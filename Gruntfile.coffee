@@ -15,6 +15,10 @@ module.exports = (grunt) ->
         options:
           create: ['out', 'out/web']
     copy:
+      gosrc: # Copy the Go files to the output dir because Go is picky about paths...
+        files: [
+          {expand: true, cwd: 'src/go/', src: ['**'], dest: 'out/'}
+        ]
       resources:
         files: [
           {expand: true, cwd: 'src/resources/', src: ['**'], dest: 'out/web/'}
@@ -29,13 +33,23 @@ module.exports = (grunt) ->
           sourceMap: true
           declaration: false
     go:
-      wetube:
+      wetube_src:
         root: 'src/go/'
+        output: 'out/'
+        run_files: ['wetube.go']
+      wetube_out:
+        root: 'out/'
         output: 'out/'
         run_files: ['wetube.go']
     open:
       dev:
         path: 'http://localhost:9191/index.html'
 
-  grunt.registerTask 'default', ['mkdir', 'copy:resources', 'typescript', 'go:run:wetube']
-
+  grunt.registerTask 'default', [
+    'mkdir'
+    'go:fmt:wetube_src'
+    'copy:gosrc'
+    'copy:resources'
+    'typescript'
+    'go:run:wetube_out'
+  ]

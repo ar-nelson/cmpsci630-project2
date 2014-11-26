@@ -42,8 +42,15 @@ module.exports = (grunt) ->
         output: 'out/'
         run_files: ['wetube.go']
     open:
-      dev:
+      wetube:
         path: 'http://localhost:9191/index.html'
+        options:
+          openOn: 'browserLaunch'
+
+  grunt.registerTask 'delayBrowserLaunch', ->
+    setTimeout ->
+      grunt.event.emit("browserLaunch")
+    , 3000
 
   grunt.registerTask 'default', [
     'mkdir'
@@ -51,5 +58,7 @@ module.exports = (grunt) ->
     'copy:gosrc'
     'copy:resources'
     'typescript'
+    'open:wetube'
+    'delayBrowserLaunch'
     'go:run:wetube_out'
   ]

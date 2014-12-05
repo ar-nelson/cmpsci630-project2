@@ -17,30 +17,26 @@ module.exports = (grunt) ->
     copy:
       gosrc: # Copy the Go files to the output dir because Go is picky about paths...
         files: [
-          {expand: true, cwd: 'src/go/', src: ['**'], dest: 'out/'}
-        ]
-      resources:
-        files: [
-          {expand: true, cwd: 'src/resources/', src: ['**'], dest: 'out/web/'}
+          {expand: true, cwd: 'src/', src: ['**'], dest: 'out/'}
         ]
     typescript:
       base:
-        src: ['src/ts/*.ts']
+        src: ['ts/**/*.ts']
         dest: 'out/web/wetube.js'
         options:
           target: 'es5'
-          basePath: 'src/ts/'
+          basePath: 'ts/'
           sourceMap: true
           declaration: false
     go:
       wetube_src:
-        root: 'src/go/'
+        root: 'src/'
         output: 'out/'
-        run_files: ['wetube.go']
+        run_files: ['wetube/wetube.go']
       wetube_out:
         root: 'out/'
         output: 'out/'
-        run_files: ['wetube.go']
+        run_files: ['wetube/wetube.go']
     open:
       wetube:
         path: 'http://localhost:9191/index.html'
@@ -56,7 +52,6 @@ module.exports = (grunt) ->
     'mkdir'
     'go:fmt:wetube_src'
     'copy:gosrc'
-    'copy:resources'
     'typescript'
     'open:wetube'
     'delayBrowserLaunch'

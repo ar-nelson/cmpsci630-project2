@@ -1,0 +1,103 @@
+<!doctype HTML>
+<html>
+  <head>
+    <title>WeTube - Adam Nelson</title>
+    <link rel="stylesheet" href="wetube.css" />
+    <script type="text/javascript" src="lib/jquery-1.11.1.min.js"></script>
+    <script type="text/javascript" src="lib/swfobject.js"></script>
+    <script type="text/javascript" src="wetube.js"></script>
+  </head>
+  <body>
+    <header>
+      <h1>WeTube &#9654;</h1>
+    </header>
+    <div id="main">
+      <div id="rightpane">
+        <div id="ytapiplayer"></div>
+      </div>
+      <div id="leftpane">
+        <h2 id="clientname" class="name">Client Name</h2>
+        <form id="video_form" class="editor_only">
+          <label for="video">Video ID:</label>
+          <input type="text" name="video" id="video" maxlength="11" value="M7lc1UVf-VE" />
+          <input type="submit" value="Play &#9654;" />
+        </form>
+        <div id="invite_button" class="button director_only">
+          Invite New Viewer
+        </div>
+        <section>
+          <h3>Peers Online:</h3>
+          <ul id="peerlist">
+          </ul>
+        </section>
+      </div>
+    </div>
+    <footer>
+      <small>CMPSCI 630 class project by Adam Nelson</small>
+    </footer>
+    <aside class="dialog" id="session_type_dialog" hidden>
+      <div class="dialogcontents">
+        <h3>Select Session Type</h3>
+        <div class="button" id="new_session_button">
+          Start New Session
+        </div>
+        <div class="button" id="join_session_button">
+          Join Existing Session
+        </div>
+      </div>
+    </aside>
+    <aside class="dialog" id="invitation_dialog" hidden>
+      <div class="dialogcontents">
+        <h3>Invite New Viewer</h3>
+        <form id="invitation_form">
+          <table width="100%" cellpadding="5">
+            <tr>
+              <td align="right"><label for="ip">IP Address:</label></td>
+              <td><input type="text" name="ip" id="ip" /></td>
+            </tr>
+            <tr>
+              <td align="right"><label for="rank">Rank:</label></td>
+              <td>
+                <select name="rank" id="rank">
+                  <option value="3">Viewer</option>
+                  <option value="2">Editor</option>
+                  <option value="1">Director</option>
+                </select>
+              </td>
+            </tr>
+            <tr>
+              <td>&nbsp;</td>
+              <td>
+                <input type="submit" value="Submit" />
+                <button id="invitation_dialog_cancel_button">Cancel</button>
+              </td>
+            </tr>
+          </table>
+        </form>
+      </div>
+    </aside>
+    <aside class="dialog" id="peer_info_dialog" hidden>
+      <div class="dialogcontents">
+        <h3>Peer Information</h3>
+        <dl>
+          <dt>Name</dt>
+          <dd id="info_name">(Peer Name)</dd>
+          <dt>Rank</dt>
+          <dd id="info_rank">(Peer Rank)</dd>
+          <dt>IP Address</dt>
+          <dd id="info_ip">(Peer IP Address)</dd>
+        </dl>
+        <form id="rank_change_form" class="director_only">
+          <label for="newrank">Change Rank:</label>
+          <select name="newrank" id="newrank">
+            <option value="3">Viewer</option>
+            <option value="2">Editor</option>
+            <option value="1">Director</option>
+          </select>
+          <input type="submit" value="Submit" />
+        </form>
+        <div class="button" id="peer_info_dialog_close_button">Close</div>
+      </div>
+    </aside>
+  </body>
+</html>

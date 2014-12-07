@@ -51,5 +51,5 @@ $(document).ready(() => {
             console.error("Got something other than a BrowserConnectAck from client.");
         }
     }
-    //initYouTube("dQw4w9WgXcQ") // Never gonna give you up...
+    initYouTube("M7lc1UVf-VE")
 });

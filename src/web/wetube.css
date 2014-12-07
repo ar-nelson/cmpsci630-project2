@@ -1,0 +1,131 @@
+body {
+  background-color: #ffffff;
+  font-family: "Segoe UI", "Lucida Grande", "Trebuchet MS", sans-serif;
+  font-size: 12;
+  margin: 0;
+  padding: 0;
+}
+
+header {
+  background-color: #ffffff;
+  text-align: center;
+  margin: 0;
+}
+
+header h1 {
+  background-color: #cc181e;
+  color: #ffffff;
+  font-weight: bold;
+  width: 7em;
+  margin: 0 auto;
+  padding: 0.2em;
+  text-align: center;
+}
+
+#main {
+  background-color: #cccccc;
+  position: relative;
+  height: 640px;
+  min-width: 960px;
+}
+
+#leftpane {
+  float: left;
+  padding: 10px;
+  width: 300px;
+}
+
+#rightpane {
+  background-color: #1b1b1b;
+  position: relative;
+  float: right;
+  width: 640px;
+  height: 640px;
+}
+
+footer {
+  clear: right;
+  color: #888888;
+  text-align: center;
+  margin: 1em;
+}
+
+input {
+  padding: 2px;
+}
+
+input[type="submit"], input[type="button"], button {
+  background-color: #cc181e;
+  font-family: "Segoe UI", "Lucida Grande", "Trebuchet MS", sans-serif;
+  font-weight: bold;
+  color: #ffffff;
+  padding: 2px;
+  border: 1px solid #442222;
+  cursor: pointer;
+}
+
+input#video {
+  font-family: "Consolas", "Monaco", "Courier New", monospace;
+}
+
+.button {
+  font-size: 14;
+  font-weight: bold;
+  color: #ffffff;
+  display: block;
+  background-color: #cc181e;
+  text-align: center;
+  padding: 0.5em;
+  margin: 0.5em;
+  border: 1px solid #442222;
+  cursor: pointer;
+}
+
+.dialog {
+  position: absolute;
+  background-color: rgba(0, 0, 0, 0.5);
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.dialogcontents {
+  background-color: #aaaaaa;
+  width: 50%;
+  border: 5px solid #888888;
+  margin: 20% auto 0;
+  padding: 0 0 1em;
+}
+
+.dialogcontents h3 {
+  background-color: #888888;
+  text-align: center;
+  margin: 0 0 1em;
+  padding: 0.5em 0;
+}
+
+.dialogcontents dl {
+  padding: 0 1em 0.5em;
+}
+
+.dialogcontents dl dd {
+  font-weight: bold;
+}
+
+#rank_change_form {
+  padding: 0 1em 0.5em;
+}
+
+.director {
+  color: #ff0000;
+}
+
+.editor {
+  color: #00ff00;
+}
+
+.viewer {
+  color: #000000;
+}
+

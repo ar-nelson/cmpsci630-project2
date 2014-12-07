@@ -29,17 +29,19 @@ module.exports = (grunt) ->
           sourceMap: true
           declaration: false
     go:
+      options:
+        GOPATH: ['.', '../lib']
       wetube_src:
         root: 'src/'
         output: 'out/'
-        run_files: ['wetube/wetube.go']
+        run_files: ['wetube.go']
       wetube_out:
         root: 'out/'
         output: 'out/'
-        run_files: ['wetube/wetube.go']
+        run_files: ['wetube.go']
     open:
       wetube:
-        path: 'http://localhost:9191/index.html'
+        path: 'https://localhost:9191/index.html'
         options:
           openOn: 'browserLaunch'
 
@@ -49,6 +51,7 @@ module.exports = (grunt) ->
     , 3000
 
   grunt.registerTask 'default', [
+    'clean'
     'mkdir'
     'go:fmt:wetube_src'
     'copy:gosrc'

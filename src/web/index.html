@@ -57,6 +57,21 @@
         <img src="/images/spinner.gif" alt="Please wait..." />
       </div>
     </aside>
+    <aside class="dialog" id="invitation_response_dialog" hidden>
+      <div class="dialogcontents">
+        <h3>Invitation Received</h3>
+        <p>
+          <b id="invitation_name">(Name)</b> has invited you to a WeTube session (Currently
+          watching "<i id="invitation_video">(Video)</i>").
+        </p>
+        <div class="button" id="accept_invitation_button">
+          Accept
+        </div>
+        <div class="button" id="reject_invitation_button">
+          Reject
+        </div>
+      </div>
+    </aside>
     <aside class="dialog" id="invitation_dialog" hidden>
       <div class="dialogcontents">
         <h3>Invite New Viewer</h3>
@@ -67,12 +82,16 @@
               <td><input type="text" name="ip" id="ip" /></td>
             </tr>
             <tr>
+              <td align="right"><label for="port">Port:</label></td>
+              <td><input type="text" name="port" id="port" maxlength="5" value="9191" /></td>
+            </tr>
+            <tr>
               <td align="right"><label for="rank">Rank:</label></td>
               <td>
                 <select name="rank" id="rank">
-                  <option value="3">Viewer</option>
+                  <option value="1">Viewer</option>
                   <option value="2">Editor</option>
-                  <option value="1">Director</option>
+                  <option value="3">Director</option>
                 </select>
               </td>
             </tr>
@@ -97,13 +116,15 @@
           <dd id="info_rank">(Peer Rank)</dd>
           <dt>IP Address</dt>
           <dd id="info_ip">(Peer IP Address)</dd>
+          <dt>Port</dt>
+          <dd id="info_port">(Peer Port)</dd>
         </dl>
         <form id="rank_change_form" class="director_only">
           <label for="newrank">Change Rank:</label>
           <select name="newrank" id="newrank">
-            <option value="3">Viewer</option>
+            <option value="1">Viewer</option>
             <option value="2">Editor</option>
-            <option value="1">Director</option>
+            <option value="3">Director</option>
           </select>
           <input type="submit" value="Submit" />
         </form>

@@ -122,6 +122,11 @@ input#video {
   padding: 0 1em 0.5em;
 }
 
+#peerlist li {
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 .director {
   color: #ff0000;
 }

@@ -11,7 +11,7 @@ import (
 )
 
 type PeerMessage struct {
-	SenderId  int
+	SenderId  int32
 	IpAddress string
 	Type      MsgType
 	Payload   []byte
@@ -38,7 +38,7 @@ func (message *PeerMessage) MsgType() MsgType {
 	return message.Type
 }
 
-func (message *PeerMessage) Sender() (int, string, bool) {
+func (message *PeerMessage) Sender() (int32, string, bool) {
 	return message.SenderId, message.IpAddress, false
 }
 
@@ -55,14 +55,23 @@ func (message *PeerMessage) Respond(client *Client, messageType MsgType, content
 	return nil
 }
 
-func (message *PeerMessage) ReadValue(client *Client, into interface{}) error {
-	peer := (*client.Peers)[message.SenderId]
-	if peer == nil {
-		return fmt.Errorf("PeerMessage: No peer with id %d.", message.SenderId)
-	}
-	err := rsa.VerifyPKCS1v15(peer.PublicKey, crypto.SHA256, message.Payload, message.Signature)
-	if err != nil {
-		return err
+func (message *PeerMessage) ReadValue(client *Client, into interface{}, secure bool) error {
+	if secure {
+		client.PeersMutex.RLock()
+		defer client.PeersMutex.RUnlock()
+		peer := (*client.Peers)[message.SenderId]
+		if peer == nil {
+			if client.Leader != nil && message.SenderId == client.Leader.Id {
+				peer = client.Leader
+			} else {
+				return fmt.Errorf("PeerMessage: No peer with id %d.", message.SenderId)
+			}
+		}
+		hash := sha256.Sum256(message.Payload)
+		err := rsa.VerifyPKCS1v15(peer.PublicKey, crypto.SHA256, hash[:], message.Signature)
+		if err != nil {
+			return err
+		}
 	}
 	decoder := gob.NewDecoder(bytes.NewBuffer(message.Payload))
 	return decoder.Decode(into)

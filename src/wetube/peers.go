@@ -2,6 +2,7 @@ package wetube
 
 import (
 	"crypto/rsa"
+	"crypto/tls"
 	"encoding/gob"
 	"fmt"
 	"github.com/gorilla/websocket"
@@ -12,8 +13,12 @@ import (
 
 func (client *Client) establishPeerConnection(rosterEntry *RosterEntry) (*Peer, error) {
 	// Open a WebSocket connection to the peer.
-	conn, _, err := websocket.DefaultDialer.Dial(
-		fmt.Sprintf("wss://%s/peerSocket", rosterEntry.Address), nil)
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 5 * time.Second,
+		TLSClientConfig:  &tls.Config{InsecureSkipVerify: true},
+	}
+	conn, _, err := dialer.Dial(
+		fmt.Sprintf("wss://%s:%d/peerSocket", rosterEntry.Address, rosterEntry.Port), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -24,27 +29,30 @@ func (client *Client) establishPeerConnection(rosterEntry *RosterEntry) (*Peer, 
 		closeChannel = make(chan bool, 1)
 		inChannel    = make(chan *PeerMessage, 91)
 		peer         = &Peer{
-			Id:      rosterEntry.Id,
-			Name:    rosterEntry.Name,
-			Address: rosterEntry.Address,
-			Rank:    rosterEntry.Rank,
-			PublicKey: &rsa.PublicKey{
-				N: &big.Int{},
-				E: rosterEntry.PublicKey.E,
-			},
+			Id:           rosterEntry.Id,
+			Name:         rosterEntry.Name,
+			Address:      rosterEntry.Address,
+			Port:         rosterEntry.Port,
+			Rank:         rosterEntry.Rank,
 			CloseChannel: closeChannel,
 			OutChannel:   inChannel,
 		}
 	)
-	peer.PublicKey.N.SetBytes(rosterEntry.PublicKey.N)
+	if rosterEntry.PublicKey != nil {
+		peer.PublicKey = &rsa.PublicKey{
+			N: &big.Int{},
+			E: rosterEntry.PublicKey.E,
+		}
+		peer.PublicKey.N.SetBytes(rosterEntry.PublicKey.N)
+	}
 
 	// If this client is the leader, set up a timeout.
-	if client.IsLeader {
-		peer.Timeout = time.AfterFunc(peerHeartbeatTimeout, func() {
-			log.Printf("Timed out waiting for Heartbeat from peer at %s.", peer.Address)
-			closeChannel <- true
-		})
-	}
+	//if client.IsLeader {
+	//	peer.Timeout = time.AfterFunc(peerHeartbeatTimeout, func() {
+	//		log.Printf("Timed out waiting for Heartbeat from peer at %s.", peer.Address)
+	//		closeChannel <- true
+	//	})
+	//}
 
 	// Read from the connection, and discard everything received. This connection is only used for
 	// output, so its only purpose is to notify us of an error.
@@ -84,17 +92,24 @@ func (client *Client) establishPeerConnection(rosterEntry *RosterEntry) (*Peer, 
 		conn.Close()
 
 		client.PeersMutex.Lock()
+		_, exists := (*client.Peers)[peer.Id]
 		delete(*client.Peers, peer.Id)
 		client.PeersMutex.Unlock()
 
-		client.PeersMutex.RLock()
-		if client.IsLeader {
-			err := client.BroadcastToPeers(T_RosterUpdate, RosterUpdate{client.Roster()})
+		if exists {
+			client.PeersMutex.RLock()
+			err := client.SyncRosterWithBrowser()
 			if err != nil {
-				log.Printf("roster update broadcast: %s", err)
+				log.Printf("roster update to browser: %s", err)
 			}
+			if client.IsLeader {
+				err = client.BroadcastToPeers(T_RosterUpdate, RosterUpdate{client.Roster()})
+				if err != nil {
+					log.Printf("roster update broadcast: %s", err)
+				}
+			}
+			client.PeersMutex.RUnlock()
 		}
-		client.PeersMutex.RUnlock()
 	}()
 
 	return peer, nil
@@ -105,8 +120,9 @@ func (peer *Peer) toRosterEntry() *RosterEntry {
 		Id:      peer.Id,
 		Name:    peer.Name,
 		Address: peer.Address,
+		Port:    peer.Port,
 		Rank:    peer.Rank,
-		PublicKey: SerializedPublicKey{
+		PublicKey: &SerializedPublicKey{
 			N: peer.PublicKey.N.Bytes(),
 			E: peer.PublicKey.E,
 		},
@@ -138,8 +154,13 @@ func (client *Client) Roster() []*RosterEntry {
 
 func (client *Client) UpdateRoster(roster []*RosterEntry) {
 	client.PeersMutex.Lock()
-	newPeers := make(map[int]*Peer)
+	newPeers := make(map[int32]*Peer)
 	for _, entry := range roster {
+		if entry.Id == client.Id {
+			client.Name = entry.Name
+			client.Rank = entry.Rank
+			continue
+		}
 		if peer, ok := (*client.Peers)[entry.Id]; ok {
 			newPeers[entry.Id] = peer
 			peer.Name = entry.Name
@@ -159,8 +180,21 @@ func (client *Client) UpdateRoster(roster []*RosterEntry) {
 			peer.CloseChannel <- true
 		}
 	}
+	log.Printf("Roster updated [%d peer(s)]:", len(newPeers))
+	for _, peer := range newPeers {
+		log.Printf("- %s (id %d, addr %s:%d)", peer.Name, peer.Id, peer.Address, peer.Port)
+	}
 	client.Peers = &newPeers
 	client.PeersMutex.Unlock()
+}
+
+func (client *Client) SyncRosterWithBrowser() error {
+	bmessage, err := NewBrowserMessage(T_RosterUpdate, RosterUpdate{client.Roster()})
+	if err != nil {
+		return err
+	}
+	client.ToBrowser <- bmessage
+	return nil
 }
 
 func (client *Client) BroadcastToPeers(t MsgType, message interface{}) error {
@@ -194,10 +228,14 @@ func (client *Client) SetLeader(leader *Peer) {
 		client.Leader.CloseChannel <- true
 	}
 	client.Leader = leader
+	log.Printf("Leader updated: %s (id %d, addr %s:%d)", leader.Name, leader.Id, leader.Address,
+		leader.Port)
 }
 
 func (client *Client) BecomeLeader() {
 	client.PeersMutex.Lock()
+	client.Rank = Director
+	client.OutstandingInvitations = make(map[int32]*OutstandingInvitation)
 	if !client.IsLeader {
 		if client.Leader != nil {
 			client.Leader.CloseChannel <- true
@@ -212,7 +250,11 @@ func (client *Client) BecomeLeader() {
 		}
 	}
 	client.PeersMutex.Unlock()
-	err := client.BroadcastToPeers(T_RosterUpdate, RosterUpdate{client.Roster()})
+	err := client.SyncRosterWithBrowser()
+	if err != nil {
+		log.Printf("roster update to browser: %s", err)
+	}
+	err = client.BroadcastToPeers(T_RosterUpdate, RosterUpdate{client.Roster()})
 	if err != nil {
 		log.Printf("roster update broadcast: %s", err)
 	}

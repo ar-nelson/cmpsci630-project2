@@ -17,9 +17,10 @@ const (
 )
 
 type Peer struct {
-	Id           int
+	Id           int32
 	Name         string
 	Address      string
+	Port         uint16
 	Rank         Rank
 	PublicKey    *rsa.PublicKey
 	CloseChannel chan<- bool
@@ -62,24 +63,32 @@ func (video *Video) ToInstant() VideoInstant {
 
 type Message interface {
 	MsgType() MsgType
-	Sender() (peerId int, ip string, isBrowser bool)
+	Sender() (peerId int32, ip string, isBrowser bool)
 	Respond(client *Client, messageType MsgType, message interface{}) error
-	ReadValue(client *Client, into interface{}) error
+	ReadValue(client *Client, into interface{}, secure bool) error
+}
+
+type OutstandingInvitation struct {
+	Peer       *Peer
+	Invitation *Invitation
 }
 
 type Client struct {
-	Id              int
-	Name            string
-	Rank            Rank
-	PrivateKey      *rsa.PrivateKey
-	VideoMutex      sync.RWMutex
-	Video           Video
-	IsLeader        bool
-	PeersMutex      sync.RWMutex
-	Leader          *Peer
-	Peers           *map[int]*Peer
-	BrowserConnect  chan chan *BrowserMessage
-	ToBrowser       chan<- *BrowserMessage
-	BrowserTimeout  *time.Timer
-	HeartbeatTicker *time.Ticker
+	Id                     int32
+	Port                   uint16
+	ServeHtml              bool
+	Name                   string
+	Rank                   Rank
+	PrivateKey             *rsa.PrivateKey
+	VideoMutex             sync.RWMutex
+	Video                  Video
+	IsLeader               bool
+	PeersMutex             sync.RWMutex
+	Leader                 *Peer
+	Peers                  *map[int32]*Peer
+	BrowserConnect         chan chan *BrowserMessage
+	ToBrowser              chan<- *BrowserMessage
+	BrowserTimeout         *time.Timer
+	HeartbeatTicker        *time.Ticker
+	OutstandingInvitations map[int32]*OutstandingInvitation
 }

@@ -24,7 +24,7 @@ const (
 type BrowserConnectAck struct {
 	Success bool
 	Reason  string
-	Id      int
+	Id      int32
 }
 
 type BrowserDisconnect struct{}
@@ -37,40 +37,44 @@ type SessionInit struct {
 type SessionOk struct{}
 
 type Invitation struct {
-	Leader           RosterEntry
+	Leader           *RosterEntry
 	RankOffered      Rank
 	CurrentVideoName string
+	Random           int32
 }
 
 type InvitationResponse struct {
-	Accepted bool
-	Id       string
-	Name     string
+	Accepted  bool
+	Id        int32
+	Name      string
+	PublicKey *SerializedPublicKey
+	Random    int32
 }
 
 type JoinConfirmation struct {
-	RosterUpdate
 	Success bool
 	Reason  string
+	Roster  []*RosterEntry
 }
 
 type Heartbeat struct {
-	Random int
+	Random int32
 }
 
 type HeartbeatAck struct {
-	Random int
+	Random int32
 }
 
 type VideoUpdateRequest VideoInstant
 
 type RankChangeRequest struct {
-	PeerId  int
+	PeerId  int32
 	NewRank Rank
 }
 
 type InvitationRequest struct {
 	Address    string
+	Port       uint16
 	Invitation Invitation
 }
 
@@ -79,11 +83,12 @@ type RosterUpdate struct {
 }
 
 type RosterEntry struct {
-	Id        int
+	Id        int32
 	Name      string
 	Address   string
+	Port      uint16
 	Rank      Rank
-	PublicKey SerializedPublicKey
+	PublicKey *SerializedPublicKey
 }
 
 type SerializedPublicKey struct {
@@ -94,7 +99,7 @@ type SerializedPublicKey struct {
 type VideoUpdate VideoInstant
 
 type EndSession struct {
-	LeaderId int
+	LeaderId int32
 }
 
 type Error struct {

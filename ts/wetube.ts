@@ -7,10 +7,12 @@ var myId: number
 var myName: string = "(Client Name)"
 var myRank: Rank = Rank.Unknown
 var videoId: string = "M7lc1UVf-VE"
+var currentInvitation: Invitation = null
 var videoHeartbeat: number = null
 var heartbeat: number = null
 var timeout: number = null
 var ytplayer: YT.Player = null
+var whenPlayerReady: Function = null
 var echoBlock: boolean = false
 
 enum Rank {
@@ -41,12 +43,25 @@ interface BrowserMessage {
 	Message: string
 }
 
+interface PublicKey {
+	N: string
+	E: number
+}
+
 interface Peer {
 	Id: number
 	Name: string
 	Address: string
+	Port: number
 	Rank: Rank
-	PublicKey: string
+	PublicKey: PublicKey
+}
+
+interface Invitation {
+	Leader:           Peer
+	RankOffered:      Rank
+	CurrentVideoName: string
+	Random:           number
 }
 
 function initYouTube(vid: string): void {
@@ -64,6 +79,10 @@ function onYouTubePlayerReady(id): void {
     ytplayer.addEventListener('onStateChange', 'sendVideoUpdate');
     if (myRank >= Rank.Editor) {
     	videoHeartbeat = window.setInterval(() => sendVideoUpdate(ytplayer.getPlayerState()), 5000)
+    }
+    if (whenPlayerReady) {
+    	whenPlayerReady();
+    	whenPlayerReady = null;
     }
 }
 
@@ -118,7 +137,9 @@ function setMyRank(newRank: Rank): void {
 		    clientname.addClass("editor");
 		    break;
 		case Rank.Viewer:
+			clientname.text(myName + " (Viewer)");
 			clientname.addClass("viewer");
+		    break;
 		default:
 			clientname.text(myName);
 	}
@@ -150,8 +171,38 @@ function startNewSession(leader: boolean): void {
 	}
 }
 
-function sendInvitation(e: Event): void {
+function respondToInvitation(accept: boolean): void {
+	$("#invitation_response_dialog").hide();
+	if (currentInvitation) {
+		$("#wait_for_invitation_dialog").show();
+		socket.send(buildMessage("InvitationResponse", {
+			Accepted:  accept,
+			Id:        myId,
+			Name:      myName,
+			PublicKey: null,
+			Random:    currentInvitation.Random
+		}));
+	}
+}
 
+function sendInvitation(e: Event): void {
+	e.preventDefault();
+    if (myRank < Rank.Director) return;
+    $("#invitation_dialog").hide()
+    // Get the video title.
+    $.get('https://gdata.youtube.com/feeds/api/videos/' + videoId + '?v=2&alt=json', (data) => {
+        var title = data.entry.title.$t;
+		socket.send(buildMessage("InvitationRequest", {
+			Address: $("#ip").val(),
+			Port: parseInt($("#port").val()),
+			Invitation: {
+				Leader: null,
+				RankOffered: parseInt($("#rank").val()),
+				CurrentVideoName: title,
+				Random: Math.round(Math.random() * 1000000)
+			}
+		}));
+	});
 }
 
 function selectNewVideo(e: Event): void {
@@ -178,11 +229,72 @@ function onClientTimeout(): void {
 }
 
 function elementFromPeer(peer: Peer, parent: JQuery): void {
+	var el = $("<li class='name'></li>");
+	switch (peer.Rank) {
+		case Rank.Director:
+			el.text(peer.Name + " (Director)");
+			el.addClass("director");
+			break;
+		case Rank.Editor:
+			el.text(peer.Name + " (Editor)");
+			el.addClass("editor");
+			break;
+		case Rank.Viewer:
+			el.text(peer.Name + " (Viewer)");
+			el.addClass("viewer");
+			break;
+		default:
+			el.text(peer.Name);
+	}
+	parent.append(el);
+	el.on('click', () => showPeerInfoWindow(peer));
+}
 
+function showPeerInfoWindow(peer: Peer): void {
+	$("#info_name").text(peer.Name);
+	$("#info_id").text(peer.Id);
+	$("#info_ip").text(peer.Address);
+	$("#info_port").text(peer.Port);
+	switch (peer.Rank) {
+		case Rank.Director: $("#info_rank").text("Director"); break;
+		case Rank.Editor: $("#info_rank").text("Editor"); break;
+		case Rank.Viewer: $("#info_rank").text("Viewer"); break;
+		default: $("#info_rank").text("Unknown");
+	}
+	$("#rank_change_form").on('submit', (e) => {
+		e.preventDefault();
+		socket.send(buildMessage("RankChangeRequest", {
+			PeerId: peer.Id,
+			NewRank: parseInt($("#newrank").val())
+		}));
+		$("#peer_info_dialog").hide();
+	});
+	$("#peer_info_dialog").show();
 }
 
 function handleMessage(message: BrowserMessage): void {
 	switch (message.Type) {
+		case "Invitation":
+			$("#wait_for_invitation_dialog").hide();
+			if (myRank == Rank.Unknown) {
+				currentInvitation = JSON.parse(message.Message);
+				$("#invitation_name").text(currentInvitation.Leader.Name);
+				$("#invitation_video").text(currentInvitation.CurrentVideoName);
+				$("#invitation_response_dialog").show();
+			}
+			break;
+		case "JoinConfirmation":
+			if (myRank == Rank.Unknown) {
+				var joinmsg = JSON.parse(message.Message);
+				if (joinmsg.Success) {
+					setMyRank(currentInvitation.RankOffered);
+					initYouTube(videoId);
+					$("#wait_for_invitation_dialog").hide();
+				} else {
+					alert("Join failed: " + joinmsg.Reason);
+				}
+			}
+			break;
 		case "SessionOk":
 			$("#session_type_dialog").hide();
 			if (myRank == Rank.Director) {
@@ -199,12 +311,25 @@ function handleMessage(message: BrowserMessage): void {
 			var videomsg = JSON.parse(message.Message);
 			echoBlock = true;
 			window.setTimeout(() => echoBlock = false, 2000);
+			if (!ytplayer) {
+				videoId = videomsg.Id;
+				initYouTube(videomsg.Id);
+				whenPlayerReady = () => {
+					ytplayer.seekTo(videomsg.SecondsElapsed, true);
+					switch (videomsg.State) {
+						case VideoState.Paused: ytplayer.pauseVideo(); break;
+						case VideoState.Playing: ytplayer.playVideo(); break;
+						case VideoState.Ended: ytplayer.stopVideo();
+					}
+				}
+				return;
+			}
 			
 			if (videomsg.Id == videoId) {
 				ytplayer.seekTo(videomsg.SecondsElapsed, true);
 			} else {
 				videoId = videomsg.Id;
-				ytplayer.loadVideoById(videomsg.Id, videomsg.SecondsElapsed);
+				ytplayer.loadVideoById(videoId, videomsg.SecondsElapsed);
 			}
 			switch (videomsg.State) {
 				case VideoState.Unstarted:
@@ -231,8 +356,9 @@ function handleMessage(message: BrowserMessage): void {
 			var rostermsg = JSON.parse(message.Message);
 			var peerlist = $("#peerlist");
 			peerlist.empty();
-			elementFromPeer(rostermsg.Leader, peerlist);
-			$.each(rostermsg.Others, (peer) => elementFromPeer(peer, peerlist));
+			for (var i=0; i<rostermsg.Roster.length; i++) {
+				elementFromPeer(rostermsg.Roster[i], peerlist);
+			}
 			break;
 		case "EndSession":
 			alert("Your WeTube session has ended.");
@@ -263,7 +389,9 @@ $(document).ready(() => {
                 
                 heartbeat = window.setInterval(() => {
                     console.log("Sending heartbeat.");
-                    socket.send(buildMessage("Heartbeat", {Random: Math.round(Math.random()*100000)}));
+                    socket.send(buildMessage("Heartbeat", {
+                    	Random: Math.round(Math.random() * 1000000)
+                    }));
                 }, 5000)
                 timeout = window.setTimeout(onClientTimeout, 10000);
                 
@@ -284,6 +412,8 @@ $(document).ready(() => {
     }
     $("#new_session_button").on('click', () => startNewSession(true));
     $("#join_session_button").on('click', () => startNewSession(false));
+    $("#accept_invitation_button").on('click', () => respondToInvitation(true));
+    $("#reject_invitation_button").on('click', () => respondToInvitation(false));
     $("#video_form").on('submit', selectNewVideo);
     $("#invite_button").on('click', () => $("#invitation_dialog").show());
     $("#end_session_button").on('click', () => {

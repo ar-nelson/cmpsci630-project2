@@ -21,7 +21,7 @@ func (message *BrowserMessage) MsgType() MsgType {
 	return message.Type
 }
 
-func (message *BrowserMessage) Sender() (int, string, bool) {
+func (message *BrowserMessage) Sender() (int32, string, bool) {
 	return 0, "", true
 }
 
@@ -34,6 +34,6 @@ func (message *BrowserMessage) Respond(client *Client, messageType MsgType, cont
 	return nil
 }
 
-func (message *BrowserMessage) ReadValue(client *Client, into interface{}) error {
+func (message *BrowserMessage) ReadValue(client *Client, into interface{}, secure bool) error {
 	return json.Unmarshal([]byte(message.Message), into)
 }

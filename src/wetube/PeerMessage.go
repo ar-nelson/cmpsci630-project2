@@ -51,7 +51,7 @@ func (message *PeerMessage) Respond(client *Client, messageType MsgType, content
 	if err != nil {
 		return err
 	}
-	peer.OutChannel <- *response
+	peer.OutChannel <- response
 	return nil
 }
 

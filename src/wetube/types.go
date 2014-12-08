@@ -2,7 +2,7 @@ package wetube
 
 import (
 	"crypto/rsa"
-	"net"
+	"sync"
 	"time"
 )
 
@@ -11,19 +11,20 @@ type Rank byte
 const (
 	// Ranks
 	Unknown Rank = iota
-	Director
-	Editor
 	Viewer
+	Editor
+	Director
 )
 
 type Peer struct {
-	Id         int
-	Name       string
-	Address    string
-	Rank       Rank
-	PublicKey  *rsa.PublicKey
-	OutChannel chan<- PeerMessage
-	conn       *net.Conn
+	Id           int
+	Name         string
+	Address      string
+	Rank         Rank
+	PublicKey    *rsa.PublicKey
+	CloseChannel chan<- bool
+	OutChannel   chan<- *PeerMessage
+	Timeout      *time.Timer
 }
 
 type VideoState byte
@@ -49,15 +50,18 @@ type Message interface {
 }
 
 type Client struct {
-	Id             int
-	Name           string
-	Rank           Rank
-	PublicKey      *rsa.PublicKey
-	PrivateKey     *rsa.PrivateKey
-	Video          Video
-	Leader         *Peer
-	Peers          *map[int]*Peer
-	BrowserConnect chan chan *BrowserMessage
-	ToBrowser      chan<- *BrowserMessage
-	BrowserTimeout *time.Timer
+	Id              int
+	Name            string
+	Rank            Rank
+	PrivateKey      *rsa.PrivateKey
+	VideoMutex      sync.RWMutex
+	Video           Video
+	IsLeader        bool
+	PeersMutex      sync.RWMutex
+	Leader          *Peer
+	Peers           *map[int]*Peer
+	BrowserConnect  chan chan *BrowserMessage
+	ToBrowser       chan<- *BrowserMessage
+	BrowserTimeout  *time.Timer
+	HeartbeatTicker *time.Ticker
 }

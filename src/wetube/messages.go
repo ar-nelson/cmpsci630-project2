@@ -24,6 +24,7 @@ const (
 type BrowserConnectAck struct {
 	Success bool
 	Reason  string
+	Id      int
 }
 
 type BrowserDisconnect struct{}
@@ -43,12 +44,8 @@ type Invitation struct {
 
 type InvitationResponse struct {
 	Accepted bool
-	PeerData *JoinResponseData
-}
-
-type JoinResponseData struct {
-	Id   string
-	Name string
+	Id       string
+	Name     string
 }
 
 type JoinConfirmation struct {
@@ -78,8 +75,7 @@ type InvitationRequest struct {
 }
 
 type RosterUpdate struct {
-	Leader *RosterEntry
-	Others []RosterEntry
+	Roster []*RosterEntry
 }
 
 type RosterEntry struct {
@@ -87,7 +83,12 @@ type RosterEntry struct {
 	Name      string
 	Address   string
 	Rank      Rank
-	PublicKey []byte
+	PublicKey SerializedPublicKey
+}
+
+type SerializedPublicKey struct {
+	N []byte
+	E int
 }
 
 type VideoUpdate Video

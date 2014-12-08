@@ -1,6 +1,9 @@
 package main
 
 import (
+	crypto_rand "crypto/rand"
+	"crypto/rsa"
+	"encoding/gob"
 	"github.com/gorilla/websocket"
 	"log"
 	"math/rand"
@@ -13,6 +16,12 @@ func main() {
 		Id:             rand.Int(),
 		BrowserConnect: make(chan chan *wetube.BrowserMessage, 1),
 	}
+	privateKey, err := rsa.GenerateKey(crypto_rand.Reader, 1024)
+	if err != nil {
+		log.Fatalf("generating rsa keys: %s", err)
+		return
+	}
+	client.PrivateKey = privateKey
 	log.Println("Starting WeTube HTTP server on localhost:9191...")
 	recvChannel := make(chan wetube.Message, 91)
 	go func() {
@@ -29,10 +38,7 @@ func main() {
 
 func browserSocketHandler(client *wetube.Client, out chan<- wetube.Message) func(w http.ResponseWriter, request *http.Request) {
 	return func(w http.ResponseWriter, request *http.Request) {
-		var upgrader = websocket.Upgrader{
-			ReadBufferSize:  1024,
-			WriteBufferSize: 1024,
-		}
+		var upgrader websocket.Upgrader
 		conn, err := upgrader.Upgrade(w, request, nil)
 		if err != nil {
 			log.Println(err)
@@ -105,12 +111,52 @@ func browserSocketHandler(client *wetube.Client, out chan<- wetube.Message) func
 			}
 		}
 
-		defer conn.Close()
+		conn.Close()
 	}
 }
 
 func peerSocketHandler(client *wetube.Client, out chan<- wetube.Message) func(w http.ResponseWriter, request *http.Request) {
 	return func(w http.ResponseWriter, request *http.Request) {
-		// TODO: Peer socket handler code.
+		var upgrader websocket.Upgrader
+		conn, err := upgrader.Upgrade(w, request, nil)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		address := conn.RemoteAddr().String()
+		log.Printf("Opening input socket for peer at %s.", address)
+
+		// Incoming messages ------------------------------
+
+		running := true
+		for running {
+			var nextMessage wetube.PeerMessage
+			messageType, reader, err := conn.NextReader()
+			if err == nil {
+				if messageType == websocket.BinaryMessage {
+					decoder := gob.NewDecoder(reader)
+					err = decoder.Decode(&nextMessage)
+					if err == nil {
+						nextMessage.IpAddress = address
+						out <- &nextMessage
+					} else {
+						log.Printf("peerSocket decode: %s", err)
+					}
+				} else {
+					log.Printf("Ignoring message of type %d from peer socket %s.", messageType,
+						address)
+				}
+			} else {
+				if err.Error() == "EOF" {
+					log.Printf("EOF on peer socket %s; closing.", address)
+					running = false
+				} else {
+					log.Printf("peerSocket recv: %s", err)
+				}
+			}
+		}
+
+		log.Printf("Closing input socket for peer at %s.", address)
+		conn.Close()
 	}
 }

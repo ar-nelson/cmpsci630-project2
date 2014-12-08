@@ -37,13 +37,21 @@
     </footer>
     <aside class="dialog" id="session_type_dialog" hidden>
       <div class="dialogcontents">
-        <h3>Select Session Type</h3>
+        <h3>Name and Session Type</h3>
+        <label for="new_client_name">Name:</label>
+        <input name="new_client_name" id="new_client_name" type="text" />
         <div class="button" id="new_session_button">
           Start New Session
         </div>
         <div class="button" id="join_session_button">
           Join Existing Session
         </div>
+      </div>
+    </aside>
+    <aside class="dialog" id="wait_for_invitation_dialog" hidden>
+      <div class="dialogcontents">
+        <h3>Waiting for Invitation...</h3>
+        <img src="/images/spinner.gif" alt="Please wait..." />
       </div>
     </aside>
     <aside class="dialog" id="invitation_dialog" hidden>

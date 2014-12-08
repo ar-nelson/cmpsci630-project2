@@ -31,15 +31,33 @@ type VideoState byte
 
 const (
 	// Video States
-	Stop VideoState = 1 + iota
-	Play
-	Pause
+	Unstarted VideoState = iota
+	Playing
+	Paused
+	Ended
 )
 
+type VideoInstant struct {
+	Id             string
+	State          VideoState
+	SecondsElapsed float64
+}
+
 type Video struct {
-	Id       string
-	State    VideoState
-	Position uint
+	VideoInstant
+	LastUpdate time.Time
+}
+
+func (video *Video) ToInstant() VideoInstant {
+	adjustedSeconds := video.SecondsElapsed
+	if video.State == Playing {
+		adjustedSeconds += time.Now().Sub(video.LastUpdate).Seconds()
+	}
+	return VideoInstant{
+		Id:             video.Id,
+		State:          video.State,
+		SecondsElapsed: adjustedSeconds,
+	}
 }
 
 type Message interface {

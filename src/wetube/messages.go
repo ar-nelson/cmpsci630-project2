@@ -49,9 +49,9 @@ type InvitationResponse struct {
 }
 
 type JoinConfirmation struct {
+	RosterUpdate
 	Success bool
 	Reason  string
-	Roster  RosterUpdate
 }
 
 type Heartbeat struct {
@@ -62,7 +62,7 @@ type HeartbeatAck struct {
 	Random int
 }
 
-type VideoUpdateRequest Video
+type VideoUpdateRequest VideoInstant
 
 type RankChangeRequest struct {
 	PeerId  int
@@ -91,7 +91,7 @@ type SerializedPublicKey struct {
 	E int
 }
 
-type VideoUpdate Video
+type VideoUpdate VideoInstant
 
 type EndSession struct {
 	LeaderId int

@@ -7,15 +7,33 @@ var myId: number
 var myName: string = "(Client Name)"
 var myRank: Rank = Rank.Unknown
 var videoId: string = "M7lc1UVf-VE"
-var heartbeat: number
-var timeout: number
+var videoHeartbeat: number = null
+var heartbeat: number = null
+var timeout: number = null
 var ytplayer: YT.Player = null
+var echoBlock: boolean = false
 
 enum Rank {
-	Unknown = 0,
+	Unknown,
 	Viewer,
 	Editor,
 	Director
+}
+
+enum VideoState {
+	Unstarted,
+	Playing,
+	Paused,
+	Ended
+}
+
+enum YTPlayerState {
+	UNSTARTED = -1,
+    ENDED     = 0,
+    PLAYING   = 1,
+    PAUSED    = 2, 
+    BUFFERING = 3,
+    CUED      = 5
 }
 
 interface BrowserMessage {
@@ -31,29 +49,59 @@ interface Peer {
 	PublicKey: string
 }
 
-function initYouTube(videoId: string): void {
+function initYouTube(vid: string): void {
     var params = { allowScriptAccess: 'always', allowFullScreen: 'true' };
     var attrs = { id: 'ytapiplayer' };
-    swfobject.embedSWF("https://www.youtube.com/v/" + videoId +
+    swfobject.embedSWF("https://www.youtube.com/v/" + vid +
         "?hl=en_US&rel=0&hd=1&border=0&version=3&fs=1&autoplay=0&autohide=0&enablejsapi=1&playerapiid=ytapiplayer",
         'ytapiplayer', '640', '360', '8', null, null, params, attrs);
+    videoId = vid
 }
 
 function onYouTubePlayerReady(id): void {
     console.log("YouTube player is ready.");
     ytplayer = <YT.Player><any>document.getElementById("ytapiplayer");
-    ytplayer.addEventListener('onStateChange', 'onYouTubePlayerStateChange');
+    ytplayer.addEventListener('onStateChange', 'sendVideoUpdate');
+    if (myRank >= Rank.Editor) {
+    	videoHeartbeat = window.setInterval(() => sendVideoUpdate(ytplayer.getPlayerState()), 5000)
+    }
 }
 
-function onYouTubePlayerStateChange(newState): void {
-	console.log("Player state: " + newState);
+function sendVideoUpdate(ytState: number) {
+    try {
+		var wtState: VideoState
+		switch (ytState) {
+			case YTPlayerState.PLAYING:
+				wtState = VideoState.Playing;
+				break;
+			case YTPlayerState.BUFFERING:
+			case YTPlayerState.PAUSED:
+				wtState = VideoState.Paused;
+				break;
+			case YTPlayerState.ENDED:
+				wtState = VideoState.Ended;
+				break;
+			case YTPlayerState.CUED:
+			default:
+				wtState = VideoState.Unstarted;
+		}
+		if (!echoBlock && myRank >= Rank.Editor) {
+			socket.send(buildMessage("VideoUpdateRequest", {
+				Id: videoId,
+				State: wtState,
+				SecondsElapsed: ytplayer.getCurrentTime()
+			}));
+		}
+	} catch (ex) {
+		console.error(ex)
+	}
 }
 
-function buildMessage(type: string, contents: any): BrowserMessage {
-	return {
+function buildMessage(type: string, contents: any): string {
+	return JSON.stringify({
         Type: type,
         Message: JSON.stringify(contents)
-	};
+	});
 }
 
 function setMyRank(newRank: Rank): void {
@@ -78,6 +126,14 @@ function setMyRank(newRank: Rank): void {
 	else                        $(".editor_only").hide();
 	if (newRank >= Rank.Director) $(".director_only").show();
 	else                          $(".director_only").hide();
+	if (videoHeartbeat !== null) {
+		window.clearInterval(videoHeartbeat);
+		videoHeartbeat = null;
+	}
+	if (ytplayer && newRank >= Rank.Editor) {
+		videoHeartbeat = window.setInterval(() =>
+			sendVideoUpdate(ytplayer.getPlayerState()), 5000)
+	}
 }
 
 function startNewSession(leader: boolean): void {
@@ -85,10 +141,10 @@ function startNewSession(leader: boolean): void {
 	if (name.length > 0) {
 		myName = name;
 		if (leader) setMyRank(Rank.Director);
-		socket.send(JSON.stringify(buildMessage("SessionInit", {
+		socket.send(buildMessage("SessionInit", {
 			Name: name,
 			Leader: leader
-		})));
+		}));
 	} else {
 		alert("You must enter a name for your client.");
 	}
@@ -103,10 +159,12 @@ function selectNewVideo(e: Event): void {
 	if (ytplayer) {
 		if (myRank >= Rank.Editor) {
 			var newVideoId = $("#video").val();
-			if (newVideoId.length != 11) {
+			if (newVideoId.length === 11) {
+				videoId = newVideoId;
+				ytplayer.loadVideoById(newVideoId, 0);
+			} else {
 				alert("Invalid video ID '" + newVideoId + "'.");
 			}
-			ytplayer.loadVideoById(newVideoId);
 		}
 	} else {
 		alert("YouTube player is not ready.");
@@ -138,7 +196,36 @@ function handleMessage(message: BrowserMessage): void {
             timeout = window.setTimeout(onClientTimeout, 10000);
 			break;
 		case "VideoUpdate":
-		
+			var videomsg = JSON.parse(message.Message);
+			echoBlock = true;
+			window.setTimeout(() => echoBlock = false, 2000);
+			
+			if (videomsg.Id == videoId) {
+				ytplayer.seekTo(videomsg.SecondsElapsed, true);
+			} else {
+				videoId = videomsg.Id;
+				ytplayer.loadVideoById(videomsg.Id, videomsg.SecondsElapsed);
+			}
+			switch (videomsg.State) {
+				case VideoState.Unstarted:
+					if (ytplayer.getPlayerState() == YTPlayerState.PLAYING) {
+						ytplayer.pauseVideo();
+					}
+					break;
+				case VideoState.Paused:
+					if (ytplayer.getPlayerState() != YTPlayerState.PAUSED) {
+						ytplayer.pauseVideo();
+					}
+					break;
+				case VideoState.Playing:
+					if (ytplayer.getPlayerState() != YTPlayerState.PLAYING) {
+						ytplayer.playVideo();
+					}
+					break;
+				case VideoState.Ended:
+					ytplayer.stopVideo();
+					break;
+			}
 			break;
 		case "RosterUpdate":
 			var rostermsg = JSON.parse(message.Message);
@@ -176,7 +263,7 @@ $(document).ready(() => {
                 
                 heartbeat = window.setInterval(() => {
                     console.log("Sending heartbeat.");
-                    socket.send(JSON.stringify(buildMessage("Heartbeat", {Random: Math.round(Math.random()*100000)})));
+                    socket.send(buildMessage("Heartbeat", {Random: Math.round(Math.random()*100000)}));
                 }, 5000)
                 timeout = window.setTimeout(onClientTimeout, 10000);
                 
@@ -199,7 +286,14 @@ $(document).ready(() => {
     $("#join_session_button").on('click', () => startNewSession(false));
     $("#video_form").on('submit', selectNewVideo);
     $("#invite_button").on('click', () => $("#invitation_dialog").show());
+    $("#end_session_button").on('click', () => {
+    	if (ytplayer) ytplayer.stopVideo()
+    	socket.send(buildMessage("EndSession", {LeaderId: myId}));
+    });
     $("#invitation_form").on('submit', sendInvitation);
-    $("#invitation_dialog_cancel_button").on('click', () => $("#invitation_dialog").hide());
+    $("#invitation_dialog_cancel_button").on('click', (e) => {
+    	e.preventDefault();
+    	$("#invitation_dialog").hide();
+    });
     $("#peer_info_dialog_close_button").on('click', () => $("#peer_info_dialog").hide());
 });

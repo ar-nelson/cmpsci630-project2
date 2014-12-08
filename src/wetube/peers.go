@@ -173,11 +173,6 @@ func (client *Client) BroadcastToPeers(t MsgType, message interface{}) error {
 		peer.OutChannel <- pmessage
 	}
 	client.PeersMutex.RUnlock()
-	bmessage, err := NewBrowserMessage(t, message)
-	if err != nil {
-		return err
-	}
-	client.ToBrowser <- bmessage
 	return nil
 }
 

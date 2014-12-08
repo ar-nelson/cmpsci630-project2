@@ -3,6 +3,7 @@ package wetube
 import (
 	"fmt"
 	"log"
+	"math"
 	"math/rand"
 	"time"
 )
@@ -228,7 +229,11 @@ func eventLoop(client *Client, input <-chan Message) bool {
 				if err == nil {
 					peerId, _, fromBrowser := message.Sender()
 					client.PeersMutex.RLock()
-					if !fromBrowser && client.Leader != nil && peerId == client.Leader.Id {
+					if fromBrowser && client.IsLeader {
+						client.BroadcastToPeers(T_EndSession, payload)
+						time.Sleep(5000) // Leave time to send the messages...
+						return true
+					} else if !fromBrowser && client.Leader != nil && peerId == client.Leader.Id {
 						client.PeersMutex.RUnlock()
 						return true
 					} else {
@@ -291,13 +296,13 @@ func handleVideoUpdateRequest(client *Client, message Message) {
 	client.PeersMutex.RLock()
 	if fromBrowser {
 		if client.IsLeader {
-			go handleVideoUpdateRequestAsLeader(client, payload)
+			go handleVideoUpdateRequestAsLeader(client, payload, true)
 		} else if client.Leader != nil {
 			peerMessage, err := NewPeerMessage(client, T_VideoUpdateRequest, payload)
 			if err == nil {
 				client.Leader.OutChannel <- peerMessage
 			} else {
-				log.Printf("Failed to encode VideoUpdateRequest: %s", err)
+				log.Printf("PeerMessage encode failed: %s", err)
 			}
 		} else {
 			log.Println("Ignored VideoUpdateRequest from browser: no leader.")
@@ -306,7 +311,7 @@ func handleVideoUpdateRequest(client *Client, message Message) {
 		if client.IsLeader {
 			if peer, found := (*client.Peers)[peerId]; found {
 				if peer.Rank == Editor || peer.Rank == Director {
-					go handleVideoUpdateRequestAsLeader(client, payload)
+					go handleVideoUpdateRequestAsLeader(client, payload, false)
 				} else {
 					log.Println("Ignored VideoUpdateRequet: peer not authorized.")
 				}
@@ -320,10 +325,8 @@ func handleVideoUpdateRequest(client *Client, message Message) {
 	client.PeersMutex.RUnlock()
 }
 
-func handleVideoUpdateRequestAsLeader(client *Client, request VideoUpdateRequest) {
-	client.VideoMutex.Lock()
-	client.Video = Video(request)
-	client.VideoMutex.Unlock()
+func handleVideoUpdateRequestAsLeader(client *Client, request VideoUpdateRequest, fromBrowser bool) {
+	client.SetVideo(VideoInstant(request), !fromBrowser)
 	err := client.BroadcastToPeers(T_VideoUpdate, request)
 	if err != nil {
 		log.Printf("video update broadcast: %s", err)
@@ -347,7 +350,7 @@ func handleRankChangeRequest(client *Client, message Message) {
 			if err == nil {
 				client.Leader.OutChannel <- peerMessage
 			} else {
-				log.Printf("Failed to encode RankChangeRequest: %s", err)
+				log.Printf("PeerMessage encode failed: %s", err)
 			}
 		} else {
 			log.Println("Ignored RankChangeRequest from browser: no leader.")
@@ -393,9 +396,64 @@ func handleRosterUpdate(client *Client, message Message) {
 }
 
 func handleVideoUpdate(client *Client, message Message) {
+	var payload VideoUpdate
+	err := message.ReadValue(client, &payload)
+	if err != nil {
+		respondWithError(client, message, err.Error())
+		return
+	}
+	peerId, _, fromBrowser := message.Sender()
+	client.PeersMutex.RLock()
+	if !fromBrowser && client.Leader != nil && peerId == client.Leader.Id {
+		client.SetVideo(VideoInstant(payload), true)
+	} else {
+		log.Println("VideoUpdate ignored: unauthorized source.")
+	}
+	client.PeersMutex.RUnlock()
+}
 
+func (client *Client) SetVideo(video VideoInstant, updateBrowser bool) bool {
+	client.VideoMutex.Lock()
+	defer client.VideoMutex.Unlock()
+	oldVideo := client.Video.ToInstant()
+	// If they're the same video with less than 2 seconds of difference, don't bother updating.
+	if video.Id != oldVideo.Id || video.State != oldVideo.State ||
+		math.Abs(video.SecondsElapsed-oldVideo.SecondsElapsed) >= 2 {
+		// ...otherwise, update the video information.
+		client.Video = Video{video, time.Now()}
+		log.Printf("Video state update: %v, state %d, at %f seconds.", video.Id, video.State,
+			video.SecondsElapsed)
+		if updateBrowser {
+			message, err := NewBrowserMessage(T_VideoUpdate, video)
+			if err == nil {
+				client.ToBrowser <- message
+			} else {
+				log.Printf("BrowserMessage encode failed: %s", err)
+			}
+		}
+		return true
+	} else {
+		return false
+	}
+}
+
+func (client *Client) GetVideo() VideoInstant {
+	client.VideoMutex.RLock()
+	video := client.Video.ToInstant()
+	client.VideoMutex.RUnlock()
+	return video
 }
 
 func handleError(client *Client, message Message) {
-
+	_, source, fromBrowser := message.Sender()
+	if fromBrowser {
+		source = "browser"
+	}
+	var payload Error
+	err := message.ReadValue(client, &payload)
+	if err == nil {
+		log.Printf("Remote error returned from %s: %s", source, payload.Message)
+	} else {
+		log.Printf("Error parsing error from %s: %s", source, err)
+	}
 }

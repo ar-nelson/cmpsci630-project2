@@ -236,11 +236,18 @@ func waitForInvitation(client *Client, input <-chan Message) bool {
 }
 
 func eventLoop(client *Client, input <-chan Message) bool {
+	client.LeaderTimeout = time.NewTimer(peerHeartbeatTimeout)
 	for {
 		select {
 		case <-client.BrowserTimeout.C:
 			log.Fatal("Timed out waiting for Heartbeat from browser. Disconnecting.")
 			return false
+		case <-client.LeaderTimeout.C:
+			if !client.IsLeader() {
+				log.Println("Timed out waiting for HeartbeatAck from leader.")
+				client.SetLeader(nil)
+				client.ElectNewLeader()
+			}
 		case browserChan := <-client.BrowserConnect:
 			msg, err := NewBrowserMessage(T_BrowserConnectAck, BrowserConnectAck{
 				false, "A browser is already connected to this client.", client.Id})
@@ -265,6 +272,8 @@ func eventLoop(client *Client, input <-chan Message) bool {
 				handleRosterUpdate(client, message)
 			case T_VideoUpdate:
 				handleVideoUpdate(client, message)
+			case T_LeaderVote:
+				handleLeaderVote(client, message)
 			case T_Error:
 				handleError(client, message)
 			case T_EndSession:
@@ -329,7 +338,16 @@ func handleHeartbeat(client *Client, message Message) {
 }
 
 func handleHeartbeatAck(client *Client, message Message) {
-	// TODO: Keep track of HeartbeatAcks from the leader.
+	var payload HeartbeatAck
+	err := message.ReadValue(client, &payload, true)
+	if err != nil {
+		respondWithError(client, message, err.Error())
+		return
+	}
+	peerId, _, fromBrowser := message.Sender()
+	if leader := client.GetLeader(); !fromBrowser && leader != nil && peerId == leader.Id {
+		client.LeaderTimeout.Reset(peerHeartbeatTimeout)
+	}
 }
 
 func handleInvitationResponse(client *Client, message Message) {
@@ -579,6 +597,20 @@ func handleVideoUpdate(client *Client, message Message) {
 		client.TrySendToBrowser(T_VideoUpdate, payload)
 	} else {
 		log.Println("VideoUpdate ignored: unauthorized source.")
+	}
+}
+
+func handleLeaderVote(client *Client, message Message) {
+	var payload LeaderVote
+	err := message.ReadValue(client, &payload, true)
+	if err != nil {
+		respondWithError(client, message, err.Error())
+		return
+	}
+	peerId, _, fromBrowser := message.Sender()
+	if !fromBrowser {
+		payload.Sender = peerId
+		client.AcceptLeaderVote(&payload)
 	}
 }
 

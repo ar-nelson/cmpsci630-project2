@@ -77,5 +77,11 @@ While the WebSocket protocol itself will usually report an error in most
 disconnection events, the heartbeat system is a more reliable way to guarantee
 that a connection is closed even in the event of an unexpected hang or deadlock.
 
+In the event that a session's leader disappears, a new leader is elected using a
+simplified Paxos-like algorithm. The leader is either the Director with the
+lowest (random) ID number, or the viewer with the lowest ID number if there are
+no Directors. The election process may not occur for 10-20 seconds after the
+leader actually disappears due to timeouts. 
+
 [gob]: http://blog.golang.org/gobs-of-data
 

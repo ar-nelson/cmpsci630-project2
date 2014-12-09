@@ -10,6 +10,7 @@ import (
 	"log"
 	"math"
 	"math/big"
+	mrand "math/rand"
 	"time"
 )
 
@@ -22,12 +23,16 @@ type Client struct {
 	BrowserConnect         chan chan *BrowserMessage
 	ToBrowser              chan<- *BrowserMessage
 	BrowserTimeout         *time.Timer
+	LeaderTimeout          *time.Timer
 	HeartbeatTicker        *time.Ticker
+	ElectionRetryTimeout   *time.Timer
 	OutstandingInvitations map[int32]*OutstandingInvitation
 	isLeader               bool
 	leader                 *Peer
 	peers                  map[int32]*Peer
 	video                  *Video
+	nextVoteRoundN         uint
+	voteRound              *LeaderVoteRound
 	c_isLeader             chan chan bool
 	c_getLeader            chan chan *Peer
 	c_becomeLeader         chan bool
@@ -41,6 +46,8 @@ type Client struct {
 	c_updateRoster         chan []*RosterEntry
 	c_getVideo             chan chan Video
 	c_updateVideo          chan *VideoInstant
+	c_leaderVote           chan *LeaderVote
+	c_electLeader          chan bool
 }
 
 func NewClient(id int32, port uint16) *Client {
@@ -70,6 +77,8 @@ func NewClient(id int32, port uint16) *Client {
 		c_updateRoster: make(chan []*RosterEntry, 16),
 		c_getVideo:     make(chan chan Video, 16),
 		c_updateVideo:  make(chan *VideoInstant, 16),
+		c_leaderVote:   make(chan *LeaderVote, 91),
+		c_electLeader:  make(chan bool, 16),
 	}
 	privateKey, err := rsa.GenerateKey(rand.Reader, 1024)
 	if err != nil {
@@ -86,42 +95,9 @@ func NewClient(id int32, port uint16) *Client {
 				c <- client.leader
 				close(c)
 			case <-client.c_becomeLeader:
-				client.Rank = Director
-				client.OutstandingInvitations = make(map[int32]*OutstandingInvitation)
-				if !client.isLeader {
-					if client.leader != nil {
-						client.leader.CloseChannel <- true
-						client.leader = nil
-					}
-					client.isLeader = true
-					for _, peer := range client.peers {
-						peer.Timeout = time.AfterFunc(peerHeartbeatTimeout, func() {
-							log.Printf("Timed out waiting for Heartbeat from peer at %s.", peer.Address)
-							peer.CloseChannel <- true
-						})
-					}
-				}
-				log.Println("Became leader.")
-				go client.syncRoster()
+				client.becomeLeader()
 			case leader := <-client.c_setLeader:
-				if client.isLeader {
-					if leader.Id == client.Id {
-						continue
-					} else {
-						panic("Tried to set leader when already the leader. This shouldn't happen.")
-					}
-				}
-				if peer, ok := client.peers[leader.Id]; ok {
-					leader = peer
-					delete(client.peers, leader.Id)
-				}
-				if client.leader != nil {
-					client.leader.CloseChannel <- true
-				}
-				client.leader = leader
-				log.Printf("Leader updated: %s (id %d, addr %s:%d)", leader.Name, leader.Id, leader.Address,
-					leader.Port)
-				go client.syncRoster()
+				client.setLeader(leader)
 			case peerId := <-client.c_deletePeer:
 				delete(client.peers, peerId)
 				go client.syncRoster()
@@ -229,6 +205,10 @@ func NewClient(id int32, port uint16) *Client {
 					log.Printf("Video state update: %v, state %d, at %f seconds.", video.Id, video.State,
 						video.SecondsElapsed)
 				}
+			case vote := <-client.c_leaderVote:
+				client.acceptLeaderVote(vote)
+			case <-client.c_electLeader:
+				client.electNewLeader()
 			}
 		}
 	}()
@@ -303,6 +283,14 @@ func (client *Client) GetVideo() *Video {
 
 func (client *Client) UpdateVideo(video *VideoInstant) {
 	client.c_updateVideo <- video
+}
+
+func (client *Client) AcceptLeaderVote(vote *LeaderVote) {
+	client.c_leaderVote <- vote
+}
+
+func (client *Client) ElectNewLeader() {
+	client.c_electLeader <- true
 }
 
 func (client *Client) establishPeerConnection(rosterEntry *RosterEntry) (*Peer, error) {
@@ -462,4 +450,159 @@ func (client *Client) TrySendToPeer(peer *Peer, t MsgType, payload interface{}) 
 	} else {
 		log.Printf("PeerMessage encode failed: %s", err)
 	}
+}
+
+func (client *Client) becomeLeader() {
+	client.Rank = Director
+	client.OutstandingInvitations = make(map[int32]*OutstandingInvitation)
+	if !client.isLeader {
+		if client.leader != nil {
+			client.leader.CloseChannel <- true
+			client.leader = nil
+		}
+		client.isLeader = true
+		for _, peer := range client.peers {
+			peer.Timeout = time.AfterFunc(peerHeartbeatTimeout, func() {
+				log.Printf("Timed out waiting for Heartbeat from peer at %s.", peer.Address)
+				peer.CloseChannel <- true
+			})
+		}
+	}
+	log.Println("Became leader.")
+	go client.syncRoster()
+}
+
+func (client *Client) setLeader(leader *Peer) {
+	if leader == nil {
+		if client.leader != nil {
+			client.leader.CloseChannel <- true
+		}
+		client.leader = nil
+		log.Printf("Leader set to nil.")
+		go client.syncRoster()
+		return
+	}
+	if client.isLeader {
+		if leader.Id == client.Id {
+			return
+		} else {
+			panic("Tried to set leader when already the leader. This shouldn't happen.")
+		}
+	}
+	if peer, ok := client.peers[leader.Id]; ok {
+		leader = peer
+		delete(client.peers, leader.Id)
+	}
+	if client.leader != nil {
+		client.leader.CloseChannel <- true
+	}
+	client.leader = leader
+	log.Printf("Leader updated: %s (id %d, addr %s:%d)", leader.Name, leader.Id, leader.Address,
+		leader.Port)
+	go client.syncRoster()
+}
+
+func (client *Client) acceptLeaderVote(vote *LeaderVote) {
+	if client.voteRound == nil {
+		client.electNewLeader()
+		client.acceptLeaderVote(vote)
+	} else if vote.N > client.voteRound.N {
+		client.nextVoteRoundN = vote.N
+		client.electNewLeader()
+		client.acceptLeaderVote(vote)
+	} else if vote.N == client.voteRound.N {
+		client.voteRound.Votes[vote.Sender] = vote.Vote
+		peerCount := len(client.peers)
+		if client.leader != nil {
+			peerCount++
+		}
+		if len(client.voteRound.Votes) >= peerCount {
+			client.ElectionRetryTimeout.Stop()
+			tally := make(map[int32]int32)
+			tally[client.voteRound.MyVote] = 1
+			for _, vote := range client.voteRound.Votes {
+				if count, ok := tally[vote]; ok {
+					tally[vote] = count + 1
+				} else {
+					tally[vote] = 1
+				}
+			}
+			if len(tally) == 1 {
+				myVote := client.voteRound.MyVote
+				if myVote == client.Id {
+					client.becomeLeader()
+				} else if peer, ok := client.peers[myVote]; ok {
+					client.setLeader(peer)
+				} else if client.leader == nil || myVote != client.leader.Id {
+					log.Printf("Could not elect leader with ID %d; no peer with this ID.")
+					go client.ElectNewLeader()
+					return
+				} else {
+					log.Println("Election concluded by electing the existing leader.")
+				}
+				client.voteRound = nil
+			} else {
+				var (
+					max      int32 = 0
+					majority       = client.voteRound.MyVote
+				)
+				for tvote, count := range tally {
+					if count > max || (count == max && tvote < majority) {
+						max = count
+						majority = tvote
+					}
+				}
+				client.electSpecificLeader(majority)
+			}
+		}
+	}
+}
+
+func (client *Client) electNewLeader() {
+	// Elect the director with the lowest ID, or the peer with the lowest ID if no directors.
+	if client.leader != nil {
+		client.electSpecificLeader(client.leader.Id)
+		return
+	}
+	var min int32 = math.MinInt32
+	if client.Rank == Director {
+		min = client.Id
+	}
+	for _, peer := range client.peers {
+		if peer.Rank == Director && peer.Id < min {
+			min = peer.Id
+		}
+	}
+	if min == math.MinInt32 {
+		min = client.Id
+		for _, peer := range client.peers {
+			if peer.Id < min {
+				min = peer.Id
+			}
+		}
+	}
+	client.electSpecificLeader(min)
+}
+
+func (client *Client) electSpecificLeader(vote int32) {
+	log.Println("Attempting to elect new leader.")
+	if client.ElectionRetryTimeout != nil {
+		client.ElectionRetryTimeout.Stop()
+	}
+	if client.leader == nil && len(client.peers) == 0 && vote == client.Id {
+		client.becomeLeader()
+		return
+	}
+	client.voteRound = &LeaderVoteRound{
+		N:      client.nextVoteRoundN,
+		MyVote: vote,
+		Votes:  make(map[int32]int32),
+	}
+	client.nextVoteRoundN++
+	client.ElectionRetryTimeout = time.AfterFunc(time.Duration(250+mrand.Intn(500))*time.Millisecond, func() {
+		if !client.IsLeader() && client.GetLeader() == nil {
+			client.ElectNewLeader()
+		}
+	})
+	go client.BroadcastToPeers(T_LeaderVote, LeaderVote{client.voteRound.N, vote, client.Id})
 }

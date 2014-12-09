@@ -71,3 +71,9 @@ type OutstandingInvitation struct {
 	Peer       *Peer
 	Invitation *Invitation
 }
+
+type LeaderVoteRound struct {
+	N      uint
+	MyVote int32
+	Votes  map[int32]int32
+}

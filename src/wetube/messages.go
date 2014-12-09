@@ -17,6 +17,7 @@ const (
 	T_InvitationRequest          = "InvitationRequest"
 	T_RosterUpdate               = "RosterUpdate"
 	T_VideoUpdate                = "VideoUpdate"
+	T_LeaderVote                 = "LeaderVote"
 	T_EndSession                 = "EndSession"
 	T_Error                      = "Error"
 )
@@ -97,6 +98,12 @@ type SerializedPublicKey struct {
 }
 
 type VideoUpdate VideoInstant
+
+type LeaderVote struct {
+	N      uint
+	Vote   int32
+	Sender int32
+}
 
 type EndSession struct {
 	LeaderId int32

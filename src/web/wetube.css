@@ -106,6 +106,10 @@ input#video {
   padding: 0.5em 0;
 }
 
+.dialogcontents p {
+	margin: 0 1em;
+}
+
 #wait_for_invitation_dialog .dialogcontents {
   text-align: center;
 }
@@ -132,7 +136,7 @@ input#video {
 }
 
 .editor {
-  color: #00ff00;
+  color: #008800;
 }
 
 .viewer {

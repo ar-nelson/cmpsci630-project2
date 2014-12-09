@@ -1,580 +1,401 @@
 package wetube
 
 import (
+	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
+	"encoding/gob"
 	"fmt"
+	"github.com/gorilla/websocket"
 	"log"
 	"math"
 	"math/big"
-	"math/rand"
-	"net/http"
 	"time"
 )
 
-const (
-	browserConnectionTimeout time.Duration = 30 * time.Second
-	browserHeartbeatTimeout                = 10 * time.Second
-	peerHeartbeatInterval                  = 5 * time.Second
-	peerHeartbeatTimeout                   = 10 * time.Second
-
-	PublicKeyFile  string = "certs/ssl_cert_public_key.rsa"
-	PrivateKeyFile        = "certs/ssl_cert_private_key.rsa"
-
-	DefaultVideo string = "M7lc1UVf-VE"
-)
-
-func (client *Client) Run(input chan Message) bool {
-	go func() {
-		mux := http.NewServeMux()
-		if client.ServeHtml {
-			mux.Handle("/", http.FileServer(http.Dir("./web/")))
-		}
-		mux.HandleFunc("/browserSocket", browserSocketHandler(client, input))
-		mux.HandleFunc("/peerSocket", peerSocketHandler(client, input))
-		log.Printf("Starting WeTube HTTP server on localhost:%d...", client.Port)
-		err := http.ListenAndServeTLS(fmt.Sprintf(":%d", client.Port),
-			PublicKeyFile, PrivateKeyFile, mux)
-		if err != nil {
-			log.Fatalf("wetube http server: %s", err)
-		}
-	}()
-	return connectToBrowser(client, input) &&
-		startSession(client, input) &&
-		waitForInvitation(client, input) &&
-		eventLoop(client, input)
+type Client struct {
+	Id                     int32
+	Port                   uint16
+	Name                   string
+	Rank                   Rank
+	PrivateKey             *rsa.PrivateKey
+	BrowserConnect         chan chan *BrowserMessage
+	ToBrowser              chan<- *BrowserMessage
+	BrowserTimeout         *time.Timer
+	HeartbeatTicker        *time.Ticker
+	OutstandingInvitations map[int32]*OutstandingInvitation
+	isLeader               bool
+	leader                 *Peer
+	peers                  map[int32]*Peer
+	video                  *Video
+	c_isLeader             chan chan bool
+	c_getLeader            chan chan *Peer
+	c_becomeLeader         chan bool
+	c_setLeader            chan *Peer
+	c_deletePeer           chan int32
+	c_addPeer              chan *Peer
+	c_updatePeer           chan *RosterEntry
+	c_getPeer              chan req_getPeer
+	c_listPeers            chan chan *Peer
+	c_getRoster            chan chan []*RosterEntry
+	c_updateRoster         chan []*RosterEntry
+	c_getVideo             chan chan Video
+	c_updateVideo          chan *VideoInstant
 }
 
-func connectToBrowser(client *Client, input <-chan Message) bool {
-	browserConnectionTimer := time.NewTimer(browserConnectionTimeout)
-	select {
-	case <-browserConnectionTimer.C:
-		log.Fatal("Timed out waiting for browser to connect.")
-		return false
-	case browserChan := <-client.BrowserConnect:
-		client.ToBrowser = browserChan
-		msg, err := NewBrowserMessage(T_BrowserConnectAck, BrowserConnectAck{true, "", client.Id})
-		if err != nil {
-			log.Fatalf("NewBrowserMessage: %s", err)
-			return false
-		}
-		browserChan <- msg
-		client.BrowserTimeout = time.NewTimer(browserHeartbeatTimeout)
+func NewClient(id int32, port uint16) *Client {
+	client := &Client{
+		Id:             id,
+		Port:           port,
+		BrowserConnect: make(chan chan *BrowserMessage, 1),
+		peers:          make(map[int32]*Peer),
+		video: &Video{
+			VideoInstant: VideoInstant{
+				Id:             DefaultVideo,
+				State:          Unstarted,
+				SecondsElapsed: 0.0,
+			},
+			LastUpdate: time.Now(),
+		},
+		c_isLeader:     make(chan chan bool, 16),
+		c_getLeader:    make(chan chan *Peer, 16),
+		c_becomeLeader: make(chan bool, 1),
+		c_setLeader:    make(chan *Peer, 1),
+		c_deletePeer:   make(chan int32, 16),
+		c_addPeer:      make(chan *Peer, 16),
+		c_updatePeer:   make(chan *RosterEntry, 16),
+		c_getPeer:      make(chan req_getPeer, 16),
+		c_listPeers:    make(chan chan *Peer, 16),
+		c_getRoster:    make(chan chan []*RosterEntry, 16),
+		c_updateRoster: make(chan []*RosterEntry, 16),
+		c_getVideo:     make(chan chan Video, 16),
+		c_updateVideo:  make(chan *VideoInstant, 16),
 	}
-	return true
-}
-
-func startSession(client *Client, input <-chan Message) bool {
-	client.Rank = Unknown
-	newMap := make(map[int32]*Peer)
-	client.Peers = &newMap
-	if client.Video.Id == "" {
-		client.Video.Id = DefaultVideo
+	privateKey, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		panic(fmt.Sprintf("generating rsa keys: %s", err))
 	}
-	for running := true; running; {
-		select {
-		case <-client.BrowserTimeout.C:
-			log.Fatal("Timed out waiting for Heartbeat from browser. Disconnecting.")
-			return false
-		case browserChan := <-client.BrowserConnect:
-			msg, err := NewBrowserMessage(T_BrowserConnectAck, BrowserConnectAck{
-				false, "A browser is already connected to this client.", client.Id})
-			if err == nil {
-				browserChan <- msg
-			}
-		case message := <-input:
-			switch message.MsgType() {
-			case T_Heartbeat:
-				handleHeartbeat(client, message)
-			case T_SessionInit:
-				var payload SessionInit
-				err := message.ReadValue(client, &payload, false)
-				if err == nil {
-					client.Name = payload.Name
-					if payload.Leader {
-						client.BecomeLeader()
-					}
-					err := message.Respond(client, T_SessionOk, SessionOk{})
-					if err != nil {
-						log.Printf("Failed to respond to SessionInit from browser: %v", err)
-					}
-					if payload.Leader {
-						client.TrySendToBrowser(T_VideoUpdate, client.Video)
-					}
-					running = false
-				} else {
-					respondWithError(client, message, err.Error())
-				}
-			case T_Error:
-				handleError(client, message)
-			default:
-				respondWithError(client, message, fmt.Sprintf(
-					"Did not expect message of type %s from browser.", message.MsgType()))
-			}
-		}
-	}
-	ticker := time.NewTicker(peerHeartbeatInterval)
+	client.PrivateKey = privateKey
 	go func() {
 		for {
-			<-ticker.C
-			client.PeersMutex.RLock()
-			if client.Leader != nil {
-				message, err := NewPeerMessage(client, T_Heartbeat, Heartbeat{rand.Int31()})
-				if err == nil {
-					client.Leader.OutChannel <- message
+			select {
+			case c := <-client.c_isLeader:
+				c <- client.isLeader
+				close(c)
+			case c := <-client.c_getLeader:
+				c <- client.leader
+				close(c)
+			case <-client.c_becomeLeader:
+				client.Rank = Director
+				client.OutstandingInvitations = make(map[int32]*OutstandingInvitation)
+				if !client.isLeader {
+					if client.leader != nil {
+						client.leader.CloseChannel <- true
+						client.leader = nil
+					}
+					client.isLeader = true
+					for _, peer := range client.peers {
+						peer.Timeout = time.AfterFunc(peerHeartbeatTimeout, func() {
+							log.Printf("Timed out waiting for Heartbeat from peer at %s.", peer.Address)
+							peer.CloseChannel <- true
+						})
+					}
+				}
+				log.Println("Became leader.")
+				go client.syncRoster()
+			case leader := <-client.c_setLeader:
+				if client.isLeader {
+					if leader.Id == client.Id {
+						continue
+					} else {
+						panic("Tried to set leader when already the leader. This shouldn't happen.")
+					}
+				}
+				if peer, ok := client.peers[leader.Id]; ok {
+					leader = peer
+					delete(client.peers, leader.Id)
+				}
+				if client.leader != nil {
+					client.leader.CloseChannel <- true
+				}
+				client.leader = leader
+				log.Printf("Leader updated: %s (id %d, addr %s:%d)", leader.Name, leader.Id, leader.Address,
+					leader.Port)
+				go client.syncRoster()
+			case peerId := <-client.c_deletePeer:
+				delete(client.peers, peerId)
+				go client.syncRoster()
+			case newPeer := <-client.c_addPeer:
+				if _, existing := client.peers[newPeer.Id]; existing {
+					log.Printf("Cannot add peer with id %d; peer already exists.", newPeer.Id)
+				} else {
+					client.peers[newPeer.Id] = newPeer
+				}
+				go client.syncRoster()
+			case entry := <-client.c_updatePeer:
+				if peer, ok := client.peers[entry.Id]; ok {
+					if entry.Name != "" {
+						peer.Name = entry.Name
+					}
+					if entry.Address != "" {
+						peer.Address = entry.Address
+					}
+					peer.Rank = entry.Rank
+				} else {
+					log.Printf("Cannot update peer with id %d; peer does not exist.", entry.Id)
+				}
+				go client.syncRoster()
+			case req := <-client.c_getPeer:
+				if peer, ok := client.peers[req.id]; ok {
+					req.c <- peer
+				} else {
+					if client.leader != nil && req.id == client.leader.Id {
+						req.c <- client.leader
+					} else {
+						req.c <- nil
+					}
+				}
+				close(req.c)
+			case c := <-client.c_listPeers:
+				if client.leader != nil {
+					c <- client.leader
+				}
+				for _, peer := range client.peers {
+					c <- peer
+				}
+				close(c)
+			case c := <-client.c_getRoster:
+				var roster, remaining []*RosterEntry
+				if client.leader == nil {
+					roster = make([]*RosterEntry, len(client.peers)+1)
+					remaining = roster[1:]
+				} else {
+					roster = make([]*RosterEntry, len(client.peers)+2)
+					roster[1] = client.leader.ToRosterEntry()
+					remaining = roster[2:]
+				}
+				roster[0] = client.ToRosterEntry()
+				i := 0
+				for _, peer := range client.peers {
+					remaining[i] = peer.ToRosterEntry()
+					i++
+				}
+				c <- roster
+				close(c)
+			case roster := <-client.c_updateRoster:
+				newPeers := make(map[int32]*Peer)
+				for _, entry := range roster {
+					if entry.Id == client.Id {
+						client.Name = entry.Name
+						client.Rank = entry.Rank
+						continue
+					}
+					if client.leader != nil && entry.Id == client.leader.Id {
+						client.leader.Name = entry.Name
+						client.leader.Rank = entry.Rank
+						continue
+					}
+					if peer, ok := client.peers[entry.Id]; ok {
+						newPeers[entry.Id] = peer
+						peer.Name = entry.Name
+						peer.Rank = entry.Rank
+					} else {
+						newPeer, err := client.establishPeerConnection(entry)
+						if err == nil {
+							newPeers[entry.Id] = newPeer
+						} else {
+							fmt.Printf("Cannot connect to peer '%s' at %s: %s",
+								entry.Name, entry.Address, err)
+						}
+					}
+				}
+				for id, peer := range client.peers {
+					if _, found := newPeers[id]; !found {
+						peer.CloseChannel <- true
+					}
+				}
+				client.peers = newPeers
+				go client.syncRoster()
+			case c := <-client.c_getVideo:
+				c <- *client.video
+				close(c)
+			case video := <-client.c_updateVideo:
+				oldVideo := client.video.ToInstant()
+				// If they're the same video with less than 2 seconds of difference, don't bother updating.
+				if video.Id != oldVideo.Id || video.State != oldVideo.State ||
+					math.Abs(video.SecondsElapsed-oldVideo.SecondsElapsed) >= 2 {
+					// ...otherwise, update the video information.
+					client.video = &Video{*video, time.Now()}
+					log.Printf("Video state update: %v, state %d, at %f seconds.", video.Id, video.State,
+						video.SecondsElapsed)
 				}
 			}
-			client.PeersMutex.RUnlock()
 		}
 	}()
-	return true
+	return client
 }
 
-func waitForInvitation(client *Client, input <-chan Message) bool {
-	invitationReceived := false
-	var invitation Invitation
-	for client.Rank == Unknown {
-		select {
-		case <-client.BrowserTimeout.C:
-			log.Fatal("Timed out waiting for Heartbeat from browser. Disconnecting.")
-			return false
-		case browserChan := <-client.BrowserConnect:
-			msg, err := NewBrowserMessage(T_BrowserConnectAck, BrowserConnectAck{
-				false, "A browser is already connected to this client.", client.Id})
-			if err == nil {
-				browserChan <- msg
-			}
-		case message := <-input:
-			switch message.MsgType() {
-			case T_Heartbeat:
-				handleHeartbeat(client, message)
-			case T_Invitation:
-				err := message.ReadValue(client, &invitation, false)
-				if err != nil {
-					respondWithError(client, message, err.Error())
-					continue
-				}
-				invitationReceived = true
-				if peerId, ip, fromBrowser := message.Sender(); !fromBrowser {
-					log.Printf("Got invitation from leader at %s:%d.", ip, invitation.Leader.Port)
-					invitation.Leader.Id = peerId
-					invitation.Leader.Address = ip
-					client.TrySendToBrowser(T_Invitation, invitation)
-				} else {
-					respondWithError(client, message, "Cannot accept Invitation from browser.")
-				}
-			case T_InvitationResponse:
-				if !invitationReceived {
-					log.Println("Got InvitationResponse without Invitation.")
-					continue
-				}
-				var payload InvitationResponse
-				err := message.ReadValue(client, &payload, false)
-				if err != nil {
-					respondWithError(client, message, err.Error())
-					continue
-				}
-				if _, _, fromBrowser := message.Sender(); fromBrowser {
-					leader, err := client.establishPeerConnection(invitation.Leader)
-					if err != nil {
-						log.Printf("Failed to connect to inviter: %s", err)
-						invitationReceived = false
-						continue
-					}
-					payload.PublicKey = &SerializedPublicKey{
-						N: client.PrivateKey.PublicKey.N.Bytes(),
-						E: client.PrivateKey.PublicKey.E,
-					}
-					peerMessage, err := NewPeerMessage(client, T_InvitationResponse, payload)
-					if err != nil {
-						log.Printf("Failed to send InvitationResponse: %s", err)
-						invitationReceived = false
-						continue
-					}
-					leader.OutChannel <- peerMessage
-					if payload.Accepted {
-						client.SetLeader(leader)
-					} else {
-						invitationReceived = false
-						leader.CloseChannel <- true
-					}
-				} else {
-					respondWithError(client, message,
-						"Cannot accept InvitationResponse from non-browser.")
-				}
-			case T_JoinConfirmation:
-				if !invitationReceived || client.Leader == nil {
-					log.Println("Got JoinConfirmation without Invitation.")
-					continue
-				}
-				var payload JoinConfirmation
-				err := message.ReadValue(client, &payload, true)
-				if err != nil {
-					respondWithError(client, message, err.Error())
-					continue
-				}
-				if peerId, _, fromBrowser := message.Sender(); !fromBrowser && peerId == client.Leader.Id {
-					bmessage, err := NewBrowserMessage(T_JoinConfirmation, payload)
-					if err == nil {
-						client.ToBrowser <- bmessage
-					} else {
-						log.Printf("BrowserMessage encode failed: %s", err)
-					}
-					if payload.Success {
-						client.Rank = invitation.RankOffered
-						client.UpdateRoster(payload.Roster)
-					} else {
-						log.Fatalf("Join refused: %s", payload.Reason)
-						time.Sleep(2000) // Leave time to send the message to the browser...
-						return false
-					}
-				} else {
-					respondWithError(client, message,
-						"Cannot accept JoinConfirmation from non-leader.")
-				}
-			case T_Error:
-				handleError(client, message)
-			default:
-				respondWithError(client, message, fmt.Sprintf(
-					"Did not expect message of type %s.", message.MsgType()))
-			}
-		}
+type req_getPeer struct {
+	id int32
+	c  chan *Peer
+}
+
+func (client *Client) IsLeader() bool {
+	c := make(chan bool, 1)
+	client.c_isLeader <- c
+	return <-c
+}
+
+func (client *Client) GetLeader() *Peer {
+	c := make(chan *Peer, 1)
+	client.c_getLeader <- c
+	return <-c
+}
+
+func (client *Client) BecomeLeader() {
+	client.c_becomeLeader <- true
+}
+
+func (client *Client) SetLeader(newLeader *Peer) {
+	client.c_setLeader <- newLeader
+}
+
+func (client *Client) DeletePeer(id int32) {
+	client.c_deletePeer <- id
+}
+
+func (client *Client) AddPeer(peer *Peer) {
+	client.c_addPeer <- peer
+}
+
+func (client *Client) UpdatePeer(data *RosterEntry) {
+	client.c_updatePeer <- data
+}
+
+func (client *Client) GetPeer(id int32) *Peer {
+	c := make(chan *Peer, 1)
+	client.c_getPeer <- req_getPeer{id, c}
+	return <-c
+}
+
+func (client *Client) ListPeers() chan *Peer {
+	c := make(chan *Peer, 256)
+	client.c_listPeers <- c
+	return c
+}
+
+func (client *Client) GetRoster() []*RosterEntry {
+	c := make(chan []*RosterEntry, 1)
+	client.c_getRoster <- c
+	return <-c
+}
+
+func (client *Client) UpdateRoster(roster []*RosterEntry) {
+	client.c_updateRoster <- roster
+}
+
+func (client *Client) GetVideo() *Video {
+	c := make(chan Video, 1)
+	client.c_getVideo <- c
+	v := <-c
+	return &v
+}
+
+func (client *Client) UpdateVideo(video *VideoInstant) {
+	client.c_updateVideo <- video
+}
+
+func (client *Client) establishPeerConnection(rosterEntry *RosterEntry) (*Peer, error) {
+	// Open a WebSocket connection to the peer.
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 5 * time.Second,
+		TLSClientConfig:  &tls.Config{InsecureSkipVerify: true},
 	}
-	return true
-}
-
-func eventLoop(client *Client, input <-chan Message) bool {
-	for {
-		select {
-		case <-client.BrowserTimeout.C:
-			log.Fatal("Timed out waiting for Heartbeat from browser. Disconnecting.")
-			return false
-		case browserChan := <-client.BrowserConnect:
-			msg, err := NewBrowserMessage(T_BrowserConnectAck, BrowserConnectAck{
-				false, "A browser is already connected to this client.", client.Id})
-			if err == nil {
-				browserChan <- msg
-			}
-		case message := <-input:
-			switch message.MsgType() {
-			case T_Heartbeat:
-				handleHeartbeat(client, message)
-			case T_HeartbeatAck:
-				handleHeartbeatAck(client, message)
-			case T_InvitationResponse:
-				handleInvitationResponse(client, message)
-			case T_VideoUpdateRequest:
-				handleVideoUpdateRequest(client, message)
-			case T_RankChangeRequest:
-				handleRankChangeRequest(client, message)
-			case T_InvitationRequest:
-				handleInvitationRequest(client, message)
-			case T_RosterUpdate:
-				handleRosterUpdate(client, message)
-			case T_VideoUpdate:
-				handleVideoUpdate(client, message)
-			case T_Error:
-				handleError(client, message)
-			case T_EndSession:
-				var payload EndSession
-				err := message.ReadValue(client, &payload, true)
-				if err == nil {
-					peerId, _, fromBrowser := message.Sender()
-					client.PeersMutex.RLock()
-					if fromBrowser && client.IsLeader {
-						client.BroadcastToPeers(T_EndSession, payload)
-						time.Sleep(5000) // Leave time to send the messages...
-						return true
-					} else if !fromBrowser && client.Leader != nil && peerId == client.Leader.Id {
-						client.PeersMutex.RUnlock()
-						return true
-					} else {
-						respondWithError(client, message, "Not authorized to end the session.")
-					}
-					client.PeersMutex.RUnlock()
-				} else {
-					respondWithError(client, message, err.Error())
-				}
-			default:
-				respondWithError(client, message, fmt.Sprintf(
-					"Did not expect message of type %s.", message.MsgType()))
-			}
-		}
-	}
-}
-
-func respondWithError(client *Client, message Message, err string) {
-	err2 := message.Respond(client, T_Error, Error{err})
-	if err2 != nil {
-		log.Printf("Failed to send error response '%v': %v", err, err2)
-	}
-}
-
-func handleHeartbeat(client *Client, message Message) {
-	var payload Heartbeat
-	err := message.ReadValue(client, &payload, true)
+	conn, _, err := dialer.Dial(
+		fmt.Sprintf("wss://%s:%d/peerSocket", rosterEntry.Address, rosterEntry.Port), nil)
 	if err != nil {
-		respondWithError(client, message, err.Error())
-		return
+		return nil, err
 	}
-	peerId, _, isBrowser := message.Sender()
-	if isBrowser {
-		client.BrowserTimeout.Reset(browserHeartbeatTimeout)
-		err := message.Respond(client, T_HeartbeatAck, HeartbeatAck{payload.Random})
-		if err != nil {
-			log.Printf("Failed to respond to Heartbeat from browser: %v", err)
-		}
-	} else if client.IsLeader {
-		client.PeersMutex.RLock()
-		if peer, ok := (*client.Peers)[peerId]; ok {
-			if peer.Timeout == nil {
-				peer.Timeout = time.AfterFunc(peerHeartbeatTimeout, func() {
-					log.Printf("Timed out waiting for Heartbeat from peer at %s.", peer.Address)
-					peer.CloseChannel <- true
-				})
-			} else {
-				peer.Timeout.Reset(peerHeartbeatTimeout)
-			}
-			client.TrySendToPeer(peer, T_HeartbeatAck, HeartbeatAck{payload.Random})
-		}
-		client.PeersMutex.RUnlock()
-	}
-}
+	log.Printf("Opening output socket for peer at %s.", rosterEntry.Address)
 
-func handleHeartbeatAck(client *Client, message Message) {
-	// TODO: Keep track of HeartbeatAcks from the leader.
-}
-
-func handleInvitationResponse(client *Client, message Message) {
-	client.PeersMutex.RLock()
-	if !client.IsLeader {
-		client.PeersMutex.RUnlock()
-		respondWithError(client, message, "Only leader can handle InvitationResponse.")
-		return
-	}
-	client.PeersMutex.RUnlock()
-
-	var payload InvitationResponse
-	err := message.ReadValue(client, &payload, false)
-	if err != nil {
-		respondWithError(client, message, err.Error())
-		return
-	}
-	peerId, address, fromBrowser := message.Sender()
-	if fromBrowser {
-		respondWithError(client, message, "Cannot accept InvitationResponse from browser.")
-		return
-	}
-
-	client.PeersMutex.Lock()
-	if oi, ok := client.OutstandingInvitations[payload.Random]; ok {
-		delete(client.OutstandingInvitations, payload.Random)
-		if !payload.Accepted {
-			log.Printf("Peer at %s rejected invitation.", address)
-			oi.Peer.CloseChannel <- true
-			client.PeersMutex.Unlock()
-			return
+	// Build the Peer struct.
+	var (
+		closeChannel = make(chan bool, 1)
+		inChannel    = make(chan *PeerMessage, 91)
+		peer         = &Peer{
+			Id:           rosterEntry.Id,
+			Name:         rosterEntry.Name,
+			Address:      rosterEntry.Address,
+			Port:         rosterEntry.Port,
+			Rank:         rosterEntry.Rank,
+			CloseChannel: closeChannel,
+			OutChannel:   inChannel,
 		}
-		if _, collision := (*client.Peers)[payload.Id]; collision {
-			client.TrySendToPeer(oi.Peer, T_JoinConfirmation, JoinConfirmation{
-				Success: false,
-				Reason:  "Peer ID collision.",
-			})
-			oi.Peer.CloseChannel <- true
-			client.PeersMutex.Unlock()
-			return
-		}
-		if peerId != payload.Id {
-			log.Printf("Peer at %s provided wrong ID (expected %d, got %d).", address,
-				peerId, payload.Id)
-			oi.Peer.CloseChannel <- true
-			client.PeersMutex.Unlock()
-			return
-		}
-		if payload.PublicKey == nil {
-			log.Printf("Peer at %s did not provide a public key.", address)
-			oi.Peer.CloseChannel <- true
-			client.PeersMutex.Unlock()
-			return
-		}
-		oi.Peer.Id = payload.Id
-		oi.Peer.Name = payload.Name
-		oi.Peer.PublicKey = &rsa.PublicKey{
+	)
+	if rosterEntry.PublicKey != nil {
+		peer.PublicKey = &rsa.PublicKey{
 			N: &big.Int{},
-			E: payload.PublicKey.E,
+			E: rosterEntry.PublicKey.E,
 		}
-		oi.Peer.PublicKey.N.SetBytes(payload.PublicKey.N)
-		(*client.Peers)[payload.Id] = oi.Peer
-		client.PeersMutex.Unlock()
-
-		client.TrySendToPeer(oi.Peer, T_JoinConfirmation, JoinConfirmation{
-			Success: true,
-			Roster:  client.Roster(),
-		})
-
-		client.PeersMutex.RLock()
-		err := client.SyncRosterWithBrowser()
-		if err != nil {
-			log.Printf("roster update to browser: %s", err)
-		}
-		log.Println("Sending roster update.")
-		err = client.BroadcastToPeers(T_RosterUpdate, RosterUpdate{client.Roster()})
-		if err != nil {
-			log.Printf("roster update broadcast: %s", err)
-		}
-		client.PeersMutex.RUnlock()
-	} else {
-		client.PeersMutex.Unlock()
-		log.Printf("Ignored InvitationResponse from %s; no outstanding invitation with ID %d.",
-			address, payload.Random)
+		peer.PublicKey.N.SetBytes(rosterEntry.PublicKey.N)
 	}
-}
 
-func handleVideoUpdateRequest(client *Client, message Message) {
-	var payload VideoUpdateRequest
-	err := message.ReadValue(client, &payload, true)
-	if err != nil {
-		respondWithError(client, message, err.Error())
-		return
-	}
-	peerId, _, fromBrowser := message.Sender()
-	client.PeersMutex.RLock()
-	if fromBrowser {
-		if client.IsLeader {
-			go handleVideoUpdateRequestAsLeader(client, payload, true)
-		} else if client.Leader != nil {
-			client.TrySendToPeer(client.Leader, T_VideoUpdateRequest, payload)
-		} else {
-			log.Println("Ignored VideoUpdateRequest from browser: no leader.")
-		}
-	} else {
-		if client.IsLeader {
-			if peer, found := (*client.Peers)[peerId]; found {
-				if peer.Rank == Editor || peer.Rank == Director {
-					go handleVideoUpdateRequestAsLeader(client, payload, false)
-				} else {
-					log.Println("Ignored VideoUpdateRequest: peer not authorized.")
-				}
-			} else {
-				log.Println("Ignored VideoUpdateRequest: peer not recognized.")
+	// If this client is the leader, set up a timeout.
+	//if client.IsLeader {
+	//	peer.Timeout = time.AfterFunc(peerHeartbeatTimeout, func() {
+	//		log.Printf("Timed out waiting for Heartbeat from peer at %s.", peer.Address)
+	//		closeChannel <- true
+	//	})
+	//}
+
+	// Read from the connection, and discard everything received. This connection is only used for
+	// output, so its only purpose is to notify us of an error.
+	running := true
+	go func() {
+		for running {
+			if _, _, err := conn.NextReader(); err != nil {
+				log.Printf("peerSocket external close: %s", err)
+				closeChannel <- true
+				running = false
 			}
-		} else {
-			log.Println("Ignored VideoUpdateRequest: only leader can respond to this.")
 		}
-	}
-	client.PeersMutex.RUnlock()
-}
+	}()
 
-func handleVideoUpdateRequestAsLeader(client *Client, request VideoUpdateRequest, fromBrowser bool) {
-	client.SetVideo(VideoInstant(request), !fromBrowser)
-	err := client.BroadcastToPeers(T_VideoUpdate, request)
-	if err != nil {
-		log.Printf("video update broadcast: %s", err)
-	}
-}
-
-func handleRankChangeRequest(client *Client, message Message) {
-	var payload RankChangeRequest
-	err := message.ReadValue(client, &payload, true)
-	if err != nil {
-		respondWithError(client, message, err.Error())
-		return
-	}
-	peerId, _, fromBrowser := message.Sender()
-	client.PeersMutex.RLock()
-	if fromBrowser {
-		if client.IsLeader {
-			go handleRankChangeRequestAsLeader(client, payload)
-		} else if client.Leader != nil {
-			client.TrySendToPeer(client.Leader, T_RankChangeRequest, payload)
-		} else {
-			log.Println("Ignored RankChangeRequest from browser: no leader.")
-		}
-	} else {
-		if client.IsLeader {
-			if peer, found := (*client.Peers)[peerId]; found {
-				if peer.Rank == Director {
-					go handleRankChangeRequestAsLeader(client, payload)
+	// Start a goroutine to send messages to the peer.
+	go func() {
+		for running {
+			select {
+			case <-closeChannel:
+				running = false
+			case message := <-inChannel:
+				writer, err := conn.NextWriter(websocket.BinaryMessage)
+				if err != nil {
+					log.Printf("peerSocket send: %s", err)
+					running = false
 				} else {
-					log.Println("Ignored RankChangeRequest: peer not authorized.")
+					encoder := gob.NewEncoder(writer)
+					err = encoder.Encode(message)
+					if err != nil {
+						log.Printf("peerSocket encode: %s", err)
+					}
+					writer.Close()
 				}
-			} else {
-				log.Println("Ignored RankChangeRequest: peer not recognized.")
 			}
-		} else {
-			log.Println("Ignored RankChangeRequest: only leader can respond to this.")
 		}
-	}
-	client.PeersMutex.RUnlock()
+		log.Printf("Closing output socket for peer at %s.", peer.Address)
+		conn.Close()
+
+		client.DeletePeer(peer.Id)
+	}()
+
+	return peer, nil
 }
 
-func handleRankChangeRequestAsLeader(client *Client, request RankChangeRequest) {
-	client.PeersMutex.Lock()
-	defer client.PeersMutex.Unlock()
-	if request.PeerId == client.Id {
-		log.Println("Ignored RankChangeRequest: cannot change rank of leader.")
-		return
-	} else if peer, ok := (*client.Peers)[request.PeerId]; ok {
-		peer.Rank = request.NewRank
-	} else {
-		log.Printf("Ignored RankChangeRequest: no peer with id %d.", request.PeerId)
-		return
-	}
-	err := client.SyncRosterWithBrowser()
-	if err != nil {
-		log.Printf("roster update to browser: %s", err)
-	}
-	err = client.BroadcastToPeers(T_RosterUpdate, RosterUpdate{client.Roster()})
-	if err != nil {
-		log.Printf("roster update broadcast: %s", err)
-	}
-}
-
-func handleInvitationRequest(client *Client, message Message) {
-	var payload InvitationRequest
-	err := message.ReadValue(client, &payload, true)
-	if err != nil {
-		respondWithError(client, message, err.Error())
-		return
-	}
-	peerId, _, fromBrowser := message.Sender()
-	client.PeersMutex.RLock()
-	if fromBrowser {
-		log.Println("Got InvitationRequest from browser.")
-		if client.IsLeader {
-			go handleInvitationRequestAsLeader(client, payload)
-		} else if client.Leader != nil {
-			client.TrySendToPeer(client.Leader, T_InvitationRequest, payload)
-		} else {
-			log.Println("Ignored InvitationRequest from browser: no leader.")
-		}
-	} else {
-		if client.IsLeader {
-			if peer, found := (*client.Peers)[peerId]; found {
-				if peer.Rank == Director {
-					go handleInvitationRequestAsLeader(client, payload)
-				} else {
-					log.Println("Ignored InvitationRequest: peer not authorized.")
-				}
-			} else {
-				log.Println("Ignored InvitationRequest: peer not recognized.")
-			}
-		} else {
-			log.Println("Ignored InvitationRequest: only leader can respond to this.")
-		}
-	}
-	client.PeersMutex.RUnlock()
-}
-
-func handleInvitationRequestAsLeader(client *Client, request InvitationRequest) {
-	client.PeersMutex.RLock()
-	if _, ok := client.OutstandingInvitations[request.Invitation.Random]; ok {
-		log.Printf("Cannot invite new peer at %s; ID collision.", request.Address)
-		client.PeersMutex.RUnlock()
-		return
-	}
-	request.Invitation.Leader = &RosterEntry{
+func (client *Client) ToRosterEntry() *RosterEntry {
+	return &RosterEntry{
 		Id:   client.Id,
 		Name: client.Name,
+		// Address is left blank; client can't determine its own address.
 		Port: client.Port,
 		Rank: client.Rank,
 		PublicKey: &SerializedPublicKey{
@@ -582,106 +403,46 @@ func handleInvitationRequestAsLeader(client *Client, request InvitationRequest) 
 			E: client.PrivateKey.PublicKey.E,
 		},
 	}
-	client.PeersMutex.RUnlock()
-	go func() {
-		newPeer, err := client.establishPeerConnection(&RosterEntry{
-			Id:      -91,
-			Name:    "Invited Peer",
-			Rank:    request.Invitation.RankOffered,
-			Address: request.Address,
-			Port:    request.Port,
-		})
-		if err != nil {
-			log.Printf("Failed to connect to invited peer at %s: %s", request.Address, err)
-			return
-		}
-		client.PeersMutex.Lock()
-		client.OutstandingInvitations[request.Invitation.Random] = &OutstandingInvitation{
-			Peer:       newPeer,
-			Invitation: &request.Invitation,
-		}
-		client.PeersMutex.Unlock()
-		client.TrySendToPeer(newPeer, T_Invitation, request.Invitation)
-	}()
 }
 
-func handleRosterUpdate(client *Client, message Message) {
-	var payload RosterUpdate
-	err := message.ReadValue(client, &payload, true)
-	if err != nil {
-		respondWithError(client, message, err.Error())
-		return
-	}
-	peerId, _, fromBrowser := message.Sender()
-	client.PeersMutex.RLock()
-	if !fromBrowser && client.Leader != nil && peerId == client.Leader.Id {
-		client.PeersMutex.RUnlock()
-		client.UpdateRoster(payload.Roster)
-		err = client.SyncRosterWithBrowser()
-		if err != nil {
-			log.Printf("roster update to browser: %s", err)
-		}
-	} else {
-		client.PeersMutex.RUnlock()
-		log.Println("RosterUpdate ignored: unauthorized source.")
+func (peer *Peer) ToRosterEntry() *RosterEntry {
+	return &RosterEntry{
+		Id:      peer.Id,
+		Name:    peer.Name,
+		Address: peer.Address,
+		Port:    peer.Port,
+		Rank:    peer.Rank,
+		PublicKey: &SerializedPublicKey{
+			N: peer.PublicKey.N.Bytes(),
+			E: peer.PublicKey.E,
+		},
 	}
 }
 
-func handleVideoUpdate(client *Client, message Message) {
-	var payload VideoUpdate
-	err := message.ReadValue(client, &payload, true)
-	if err != nil {
-		respondWithError(client, message, err.Error())
-		return
-	}
-	peerId, _, fromBrowser := message.Sender()
-	client.PeersMutex.RLock()
-	if !fromBrowser && client.Leader != nil && peerId == client.Leader.Id {
-		client.SetVideo(VideoInstant(payload), true)
-	} else {
-		log.Println("VideoUpdate ignored: unauthorized source.")
-	}
-	client.PeersMutex.RUnlock()
-}
-
-func (client *Client) SetVideo(video VideoInstant, updateBrowser bool) bool {
-	client.VideoMutex.Lock()
-	defer client.VideoMutex.Unlock()
-	oldVideo := client.Video.ToInstant()
-	// If they're the same video with less than 2 seconds of difference, don't bother updating.
-	if video.Id != oldVideo.Id || video.State != oldVideo.State ||
-		math.Abs(video.SecondsElapsed-oldVideo.SecondsElapsed) >= 2 {
-		// ...otherwise, update the video information.
-		client.Video = Video{video, time.Now()}
-		log.Printf("Video state update: %v, state %d, at %f seconds.", video.Id, video.State,
-			video.SecondsElapsed)
-		if updateBrowser {
-			client.TrySendToBrowser(T_VideoUpdate, video)
-		}
-		return true
-	} else {
-		return false
-	}
-}
-
-func (client *Client) GetVideo() VideoInstant {
-	client.VideoMutex.RLock()
-	video := client.Video.ToInstant()
-	client.VideoMutex.RUnlock()
-	return video
-}
-
-func handleError(client *Client, message Message) {
-	_, source, fromBrowser := message.Sender()
-	if fromBrowser {
-		source = "browser"
-	}
-	var payload Error
-	err := message.ReadValue(client, &payload, false)
+func (client *Client) SyncRosterWithBrowser() {
+	bmessage, err := NewBrowserMessage(T_RosterUpdate, RosterUpdate{client.GetRoster()})
 	if err == nil {
-		log.Printf("Remote error returned from %s: %s", source, payload.Message)
+		client.ToBrowser <- bmessage
 	} else {
-		log.Printf("Error parsing error from %s: %s", source, err)
+		log.Printf("roster update to browser: %s", err)
+	}
+}
+
+func (client *Client) BroadcastToPeers(t MsgType, message interface{}) {
+	pmessage, err := NewPeerMessage(client, t, message)
+	if err != nil {
+		log.Printf("PeerMessage encoding: %s", err)
+		return
+	}
+	for peer := range client.ListPeers() {
+		peer.OutChannel <- pmessage
+	}
+}
+
+func (client *Client) syncRoster() {
+	client.SyncRosterWithBrowser()
+	if client.IsLeader() {
+		client.BroadcastToPeers(T_RosterUpdate, RosterUpdate{client.GetRoster()})
 	}
 }
 

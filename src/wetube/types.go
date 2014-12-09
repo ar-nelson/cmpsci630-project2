@@ -2,7 +2,6 @@ package wetube
 
 import (
 	"crypto/rsa"
-	"sync"
 	"time"
 )
 
@@ -71,24 +70,4 @@ type Message interface {
 type OutstandingInvitation struct {
 	Peer       *Peer
 	Invitation *Invitation
-}
-
-type Client struct {
-	Id                     int32
-	Port                   uint16
-	ServeHtml              bool
-	Name                   string
-	Rank                   Rank
-	PrivateKey             *rsa.PrivateKey
-	VideoMutex             sync.RWMutex
-	Video                  Video
-	IsLeader               bool
-	PeersMutex             sync.RWMutex
-	Leader                 *Peer
-	Peers                  *map[int32]*Peer
-	BrowserConnect         chan chan *BrowserMessage
-	ToBrowser              chan<- *BrowserMessage
-	BrowserTimeout         *time.Timer
-	HeartbeatTicker        *time.Ticker
-	OutstandingInvitations map[int32]*OutstandingInvitation
 }

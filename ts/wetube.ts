@@ -357,7 +357,13 @@ function handleMessage(message: BrowserMessage): void {
 			var peerlist = $("#peerlist");
 			peerlist.empty();
 			for (var i=0; i<rostermsg.Roster.length; i++) {
-				elementFromPeer(rostermsg.Roster[i], peerlist);
+				if (rostermsg.Roster[i].Id == myId) {
+					if (rostermsg.Roster[i].Rank != myRank) {
+						setMyRank(rostermsg.Roster[i].Rank);
+					}
+				} else {
+					elementFromPeer(rostermsg.Roster[i], peerlist);
+				}
 			}
 			break;
 		case "EndSession":
